@@ -1,0 +1,7 @@
+target/
+# Cargo.lock commented out as recommended by Claude in order to commit binaries
+artifacts/
+node_modules/
+dist/
+.DS_Store
+.env

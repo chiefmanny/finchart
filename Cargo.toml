@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/market-core",
+    "crates/render-core",
+    "crates/backend-terminal",
+    "examples-bench",
+    "examples-tui",
+    "examples-live",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+rust-version = "1.96"
+
+[workspace.dependencies]
+market-core = { path = "crates/market-core" }
+render-core = { path = "crates/render-core" }
+backend-terminal = { path = "crates/backend-terminal" }
+
+# Release/bench builds: optimize hard so benchmark numbers are meaningful.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,9 @@
+[package]
+name = "render-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+market-core.workspace = true
