@@ -15,6 +15,15 @@ pub struct Bar {
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+    pub buy_volume: f64,
+    pub sell_volume: f64,
+}
+
+impl Bar {
+    /// Order-flow delta for this bar: buy volume minus sell volume.
+    pub fn delta(&self) -> f64 {
+        self.buy_volume - self.sell_volume
+    }
 }
 
 /// Aggregate the visible candles into `min(view.len(), target_bars)` contiguous,
@@ -40,10 +49,14 @@ pub fn aggregate(view: &CulledView, target_bars: usize) -> Vec<Bar> {
         let mut high = view.high[start];
         let mut low = view.low[start];
         let mut volume = 0.0;
+        let mut buy_volume = 0.0;
+        let mut sell_volume = 0.0;
         for i in start..end {
             high = high.max(view.high[i]);
             low = low.min(view.low[i]);
             volume += view.volume[i];
+            buy_volume += view.buy[i];
+            sell_volume += view.sell[i];
         }
 
         bars.push(Bar {
@@ -53,6 +66,8 @@ pub fn aggregate(view: &CulledView, target_bars: usize) -> Vec<Bar> {
             low,
             close: view.close[end - 1],
             volume,
+            buy_volume,
+            sell_volume,
         });
     }
 
@@ -203,5 +218,29 @@ mod tests {
         let s = CandleSeries::new();
         let v = cull(&s, &Viewport::new(0, 0));
         assert!(aggregate(&v, 10).is_empty());
+    }
+
+    #[test]
+    fn flow_is_conserved_across_aggregation() {
+        let s = gen(1_000);
+        let v = cull(&s, &Viewport::new(0, s.len()));
+        let total_buy: f64 = v.buy.iter().sum();
+        let total_sell: f64 = v.sell.iter().sum();
+        for target in [1usize, 13, 100, 1_000] {
+            let bars = aggregate(&v, target);
+            let buy: f64 = bars.iter().map(|b| b.buy_volume).sum();
+            let sell: f64 = bars.iter().map(|b| b.sell_volume).sum();
+            assert!((buy - total_buy).abs() < 1e-6, "buy lost @ {target}");
+            assert!((sell - total_sell).abs() < 1e-6, "sell lost @ {target}");
+        }
+    }
+
+    #[test]
+    fn bar_delta_is_buy_minus_sell() {
+        let s = gen(100);
+        let v = cull(&s, &Viewport::new(0, s.len()));
+        for b in aggregate(&v, 7) {
+            assert_eq!(b.delta(), b.buy_volume - b.sell_volume);
+        }
     }
 }

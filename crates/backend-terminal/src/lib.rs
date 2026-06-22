@@ -7,4 +7,4 @@ mod grid;
 mod render;
 mod timefmt;
 
-pub use render::{render_chart, rendered_bar_count, ChartOptions, ColorMode, Style};
+pub use render::{render_chart, rendered_bar_count, ChartOptions, ColorMode, DepthPanel, Style};

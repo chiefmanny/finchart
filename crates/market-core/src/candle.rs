@@ -21,8 +21,10 @@ pub struct Candle {
 /// Invariant: every column has the same length (`== self.len()`). All mutation
 /// goes through [`CandleSeries::push`], which preserves it.
 ///
-/// Order-flow columns (delta, bid/ask volume) would be added here when that
-/// milestone arrives — out of scope for the MVP.
+/// Order-flow columns (`buy_volume`/`sell_volume`) track aggressive buy/sell
+/// volume per candle; per-candle delta is derived as `buy - sell`. They are
+/// orthogonal to OHLCV — [`CandleSeries::update_last`] never touches them, and
+/// they accumulate via [`CandleSeries::add_flow_last`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CandleSeries {
     ts: Vec<i64>,
@@ -31,6 +33,8 @@ pub struct CandleSeries {
     low: Vec<f64>,
     close: Vec<f64>,
     volume: Vec<f64>,
+    buy_volume: Vec<f64>,
+    sell_volume: Vec<f64>,
 }
 
 impl CandleSeries {
@@ -48,6 +52,8 @@ impl CandleSeries {
             low: Vec::with_capacity(n),
             close: Vec::with_capacity(n),
             volume: Vec::with_capacity(n),
+            buy_volume: Vec::with_capacity(n),
+            sell_volume: Vec::with_capacity(n),
         }
     }
 
@@ -61,7 +67,10 @@ impl CandleSeries {
         self.ts.is_empty()
     }
 
-    /// Append a candle, preserving the equal-column-length invariant.
+    /// Append a candle, preserving the equal-column-length invariant. Flow
+    /// columns start at zero; accumulate them with [`add_flow_last`].
+    ///
+    /// [`add_flow_last`]: CandleSeries::add_flow_last
     pub fn push(&mut self, c: Candle) {
         self.ts.push(c.ts);
         self.open.push(c.open);
@@ -69,6 +78,18 @@ impl CandleSeries {
         self.low.push(c.low);
         self.close.push(c.close);
         self.volume.push(c.volume);
+        self.buy_volume.push(0.0);
+        self.sell_volume.push(0.0);
+    }
+
+    /// Accumulate aggressive `buy`/`sell` volume onto the most recent candle.
+    /// No-op if the series is empty. Leaves OHLCV untouched.
+    pub fn add_flow_last(&mut self, buy: f64, sell: f64) {
+        let Some(i) = self.len().checked_sub(1) else {
+            return;
+        };
+        self.buy_volume[i] += buy;
+        self.sell_volume[i] += sell;
     }
 
     /// Borrow candle `i`, or `None` if out of bounds.
@@ -133,6 +154,14 @@ impl CandleSeries {
     }
     pub fn volume(&self) -> &[f64] {
         &self.volume
+    }
+    /// Aggressive buy volume per candle (delta numerator).
+    pub fn buy_volume(&self) -> &[f64] {
+        &self.buy_volume
+    }
+    /// Aggressive sell volume per candle.
+    pub fn sell_volume(&self) -> &[f64] {
+        &self.sell_volume
     }
 }
 
@@ -237,6 +266,66 @@ mod tests {
     fn update_last_on_empty_is_a_noop() {
         let mut s = CandleSeries::new();
         s.update_last(sample(1));
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn push_initializes_flow_to_zero() {
+        let mut s = CandleSeries::new();
+        s.push(sample(1));
+        assert_eq!(s.buy_volume(), &[0.0]);
+        assert_eq!(s.sell_volume(), &[0.0]);
+    }
+
+    #[test]
+    fn flow_columns_stay_equal_length() {
+        let mut s = CandleSeries::new();
+        for i in 0..4 {
+            s.push(sample(i));
+        }
+        assert_eq!(s.buy_volume().len(), 4);
+        assert_eq!(s.sell_volume().len(), 4);
+        assert_eq!(s.buy_volume().len(), s.len());
+    }
+
+    #[test]
+    fn add_flow_last_accumulates_only_the_last_candle() {
+        let mut s = CandleSeries::new();
+        s.push(sample(1));
+        s.push(sample(2));
+
+        s.add_flow_last(10.0, 3.0);
+        s.add_flow_last(5.0, 2.0);
+
+        assert_eq!(s.buy_volume(), &[0.0, 15.0]);
+        assert_eq!(s.sell_volume(), &[0.0, 5.0]);
+    }
+
+    #[test]
+    fn update_last_preserves_flow() {
+        let mut s = CandleSeries::new();
+        s.push(sample(1));
+        s.add_flow_last(7.0, 4.0);
+
+        s.update_last(Candle {
+            ts: 1,
+            open: 1.0,
+            high: 2.0,
+            low: 0.5,
+            close: 1.5,
+            volume: 11.0,
+        });
+
+        // OHLCV updated, flow untouched.
+        assert_eq!(s.last().unwrap().close, 1.5);
+        assert_eq!(s.buy_volume(), &[7.0]);
+        assert_eq!(s.sell_volume(), &[4.0]);
+    }
+
+    #[test]
+    fn add_flow_last_on_empty_is_a_noop() {
+        let mut s = CandleSeries::new();
+        s.add_flow_last(1.0, 1.0);
         assert!(s.is_empty());
     }
 }

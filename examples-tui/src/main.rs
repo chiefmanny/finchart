@@ -105,6 +105,8 @@ impl App {
                 color: ColorMode::Ansi,
                 style: Style::OhlcBars,
                 show_volume: true,
+                show_delta: false,
+                depth: None,
                 title: "finchart · h/l pan · k/j zoom · r reset · q quit".to_string(),
             },
         )

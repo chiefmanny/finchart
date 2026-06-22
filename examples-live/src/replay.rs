@@ -2,8 +2,11 @@
 //! deterministic synthetic tick stream into candles, and render a follow-latest
 //! frame. All logic here is unit-testable without a TTY.
 
-use backend_terminal::{render_chart, ChartOptions, ColorMode, Style};
-use market_core::{generate, ticks, Candle, CandleBuilder, GenConfig, LiveConfig, TickStream};
+use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, Style};
+use market_core::{
+    generate, ticks, BookSide, Candle, CandleBuilder, DepthConfig, DepthGen, Flow, GenConfig,
+    LiveConfig, OrderBook, TickStream,
+};
 use render_core::{cull, Viewport};
 
 /// Where historical candles start (epoch seconds).
@@ -26,6 +29,16 @@ pub struct ReplayConfig {
     pub volume_per_tick: f64,
     /// Visible candle window (follow-latest tail).
     pub window: usize,
+    /// Order-book price tick size.
+    pub tick_size: f64,
+    /// Levels per side in the synthetic ladder.
+    pub depth_levels: usize,
+    /// Base resting size per depth level.
+    pub depth_base_size: f64,
+    /// Apply a depth step every this many ticks.
+    pub depth_every: usize,
+    /// Levels shown per side in the depth panel.
+    pub depth_panel_levels: usize,
 }
 
 impl Default for ReplayConfig {
@@ -41,16 +54,26 @@ impl Default for ReplayConfig {
             ticks_per_candle: 30,
             volume_per_tick: 40.0,
             window: 80,
+            tick_size: 0.05,
+            depth_levels: 12,
+            depth_base_size: 50.0,
+            depth_every: 5,
+            depth_panel_levels: 6,
         }
     }
 }
 
-/// A running live replay: closed history + a forming candle, fed by ticks.
+/// A running live replay: closed history + a forming candle, fed by ticks, plus a
+/// synthetic Level 2 order book.
 pub struct Replay {
     builder: CandleBuilder,
     stream: TickStream,
     window: usize,
     total_ticks: usize,
+    book: OrderBook,
+    depth: DepthGen,
+    depth_every: usize,
+    depth_panel_levels: usize,
 }
 
 impl Replay {
@@ -85,20 +108,40 @@ impl Replay {
             volume_per_tick: cfg.volume_per_tick,
         });
 
+        // Synthetic order book, seeded with an initial ladder around the mid.
+        let mut depth = DepthGen::new(DepthConfig {
+            seed: cfg.seed ^ 0xD3F7_0000_D3F7_0000,
+            tick_size: cfg.tick_size,
+            levels: cfg.depth_levels,
+            base_size: cfg.depth_base_size,
+            size_jitter: 0.5,
+            recenter_band: 0.5,
+            updates_per_step: cfg.depth_levels / 2,
+        });
+        let mut book = OrderBook::new(cfg.tick_size);
+        book.apply_snapshot(&depth.snapshot(live_ts, live_price));
+
         Self {
             builder,
             stream,
             window: cfg.window,
             total_ticks: 0,
+            book,
+            depth,
+            depth_every: cfg.depth_every.max(1),
+            depth_panel_levels: cfg.depth_panel_levels,
         }
     }
 
-    /// Ingest the next `n` ticks.
+    /// Ingest the next `n` ticks, stepping the order book every `depth_every`.
     pub fn advance(&mut self, n: usize) {
         for _ in 0..n {
             if let Some(tick) = self.stream.next() {
                 self.builder.ingest(tick);
                 self.total_ticks += 1;
+                if self.total_ticks.is_multiple_of(self.depth_every) {
+                    self.depth.step(&mut self.book, tick.ts, tick.price);
+                }
             }
         }
     }
@@ -124,24 +167,82 @@ impl Replay {
                 color,
                 style: Style::OhlcBars,
                 show_volume: true,
+                show_delta: true,
+                depth: Some(self.depth_panel()),
                 title: title.to_string(),
             },
         )
     }
 
-    /// A deterministic status string: the forming candle's OHLC and tick count
-    /// (no timings, so snapshot frames built from it are reproducible).
+    pub fn best_bid(&self) -> Option<f64> {
+        self.book.best_bid()
+    }
+
+    pub fn best_ask(&self) -> Option<f64> {
+        self.book.best_ask()
+    }
+
+    pub fn spread(&self) -> Option<f64> {
+        self.book.spread()
+    }
+
+    /// `(bid_levels, ask_levels)` resting in the book.
+    pub fn depth_level_counts(&self) -> (usize, usize) {
+        self.book.level_counts()
+    }
+
+    /// A render-ready depth view: top-`depth_panel_levels` bids/asks + spread.
+    pub fn depth_panel(&self) -> DepthPanel {
+        let n = self.depth_panel_levels;
+        let to_tuples = |side| {
+            self.book
+                .top_n(side, n)
+                .into_iter()
+                .map(|l| (l.price, l.size))
+                .collect()
+        };
+        DepthPanel {
+            bids: to_tuples(BookSide::Bid),
+            asks: to_tuples(BookSide::Ask),
+            spread: self.spread(),
+        }
+    }
+
+    /// The forming candle's order flow, or `None` before the first tick.
+    pub fn current_flow(&self) -> Option<Flow> {
+        self.builder.current_flow()
+    }
+
+    /// Cumulative volume delta (CVD) across the whole series.
+    pub fn cumulative_delta(&self) -> f64 {
+        self.builder.cumulative_delta()
+    }
+
+    /// A deterministic status string: the forming candle's OHLC, order-flow delta,
+    /// CVD, and tick count (no timings, so snapshot frames built from it are
+    /// reproducible).
     pub fn status(&self) -> String {
-        match self.current() {
-            Some(c) => format!(
-                "finchart LIVE · O {:.2} H {:.2} L {:.2} C {:.2} · ticks {}",
+        match (self.current(), self.current_flow()) {
+            (Some(c), Some(f)) => format!(
+                "finchart LIVE · O {:.2} H {:.2} L {:.2} C {:.2} · Δ {:+.0} · CVD {:+.0} · {} · ticks {}",
                 c.open,
                 c.high,
                 c.low,
                 c.close,
+                f.delta(),
+                self.cumulative_delta(),
+                self.book_status(),
                 self.total_ticks()
             ),
-            None => "finchart LIVE · warming up".to_string(),
+            _ => "finchart LIVE · warming up".to_string(),
+        }
+    }
+
+    /// Best bid / ask / spread fragment for the status line.
+    fn book_status(&self) -> String {
+        match (self.best_bid(), self.best_ask()) {
+            (Some(b), Some(a)) => format!("bid {b:.2} ask {a:.2} spr {:.2}", a - b),
+            _ => "bid — ask —".to_string(),
         }
     }
 
@@ -207,5 +308,57 @@ mod tests {
         let mut r = Replay::new(&cfg());
         r.advance(123);
         assert_eq!(r.total_ticks(), 123);
+    }
+
+    #[test]
+    fn current_flow_appears_after_first_tick() {
+        let mut r = Replay::new(&cfg());
+        assert!(r.current_flow().is_none());
+        r.advance(50);
+        assert!(r.current_flow().is_some());
+    }
+
+    #[test]
+    fn status_includes_delta_and_cvd() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        let s = r.status();
+        assert!(s.contains('Δ'), "status missing delta: {s}");
+        assert!(s.contains("CVD"), "status missing cvd: {s}");
+    }
+
+    #[test]
+    fn book_stays_non_crossing_during_replay() {
+        let mut r = Replay::new(&cfg());
+        r.advance(2_000);
+        let (b, a) = (r.best_bid(), r.best_ask());
+        assert!(b.is_some() && a.is_some(), "no book after replay");
+        assert!(b.unwrap() < a.unwrap(), "crossed: {b:?} >= {a:?}");
+    }
+
+    #[test]
+    fn status_includes_bid_ask_spread() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        let s = r.status();
+        assert!(s.contains("bid"), "missing bid: {s}");
+        assert!(s.contains("ask"), "missing ask: {s}");
+        assert!(s.contains("spr"), "missing spread: {s}");
+    }
+
+    #[test]
+    fn depth_panel_levels_are_sorted_best_first() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        let d = r.depth_panel();
+        assert!(!d.bids.is_empty() && !d.asks.is_empty());
+        assert!(
+            d.bids.windows(2).all(|w| w[0].0 > w[1].0),
+            "bids not descending"
+        );
+        assert!(
+            d.asks.windows(2).all(|w| w[0].0 < w[1].0),
+            "asks not ascending"
+        );
     }
 }

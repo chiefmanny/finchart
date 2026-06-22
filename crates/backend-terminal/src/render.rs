@@ -33,6 +33,9 @@ const ANSI_RESET: &str = "\u{1b}[0m";
 /// Decimal places used for price-axis labels.
 const PRICE_DECIMALS: usize = 2;
 
+/// Width of the right-side depth panel strip.
+const DEPTH_PANEL_COLS: usize = 18;
+
 /// Append plot row `r` to `out`. In `Ansi` mode, runs of same-colored cells are
 /// wrapped in escape codes (reset on color change and at end of row); in `Plain`
 /// mode the raw glyphs are written.
@@ -110,6 +113,18 @@ impl Style {
     }
 }
 
+/// A render-ready Level 2 depth view: top bid/ask levels (best-first) and the
+/// spread. Plain `(price, size)` tuples keep this decoupled from any order-book
+/// type.
+#[derive(Debug, Clone, Default)]
+pub struct DepthPanel {
+    /// Best-first (descending price).
+    pub bids: Vec<(f64, f64)>,
+    /// Best-first (ascending price).
+    pub asks: Vec<(f64, f64)>,
+    pub spread: Option<f64>,
+}
+
 /// Options for [`render_chart`].
 #[derive(Debug, Clone)]
 pub struct ChartOptions {
@@ -119,6 +134,10 @@ pub struct ChartOptions {
     pub style: Style,
     /// Show a volume panel below the price plot.
     pub show_volume: bool,
+    /// Show an order-flow delta panel (buy−sell, pos/neg around a baseline).
+    pub show_delta: bool,
+    /// Optional Level 2 depth shown in a right-side panel.
+    pub depth: Option<DepthPanel>,
     /// Status-line prefix label (e.g. `finchart · SYNTH`); may be empty.
     pub title: String,
 }
@@ -131,6 +150,8 @@ impl Default for ChartOptions {
             color: ColorMode::Plain,
             style: Style::OhlcBars,
             show_volume: false,
+            show_delta: false,
+            depth: None,
             title: String::new(),
         }
     }
@@ -153,16 +174,36 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     let axis_row = h - 1;
     let plot_top = 1;
 
-    // Rows between the title and time axis, split into price + optional volume.
+    // Reserve a fixed right strip for the optional depth panel; the chart (gutter
+    // + plot + bottom panels + time axis) uses the remaining width.
+    let depth_cols = if opts.depth.is_some() && w >= 60 {
+        DEPTH_PANEL_COLS
+    } else {
+        0
+    };
+    let chart_width = w - depth_cols;
+
+    // Rows between the title and time axis, split into price + optional panels.
+    // Each panel takes ~1/5–1/6 of the area (≥3 rows) but the price plot keeps ≥1.
     let usable = h - 2;
-    // ~1/5 of the area, at least 3 rows, but always leave the price plot ≥1 row.
     let volume_rows = if opts.show_volume && usable >= 4 {
         (usable / 5).max(3).min(usable - 1)
     } else {
         0
     };
-    let plot_rows = usable - volume_rows;
+    let delta_rows = if opts.show_delta {
+        let remaining = usable - volume_rows;
+        if remaining >= 4 {
+            (usable / 6).max(3).min(remaining - 1)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let plot_rows = usable - volume_rows - delta_rows;
     let vol_top = plot_top + plot_rows;
+    let delta_top = vol_top + volume_rows;
 
     let (price_min, price_max) = view.price_extent().unwrap_or((0.0, 1.0));
     let lbl_max = price_label(price_max);
@@ -170,7 +211,7 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     let lbl_min = price_label(price_min);
     let gutter = gutter_for(price_min, price_max);
 
-    let plot_cols = w.saturating_sub(gutter);
+    let plot_cols = chart_width.saturating_sub(gutter);
     if plot_cols == 0 {
         return blank(w, h);
     }
@@ -203,10 +244,30 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
         draw_volume_panel(&mut grid, &bars, vol_top, volume_rows, gutter, cell);
     }
 
+    // Optional order-flow delta panel.
+    if delta_rows > 0 {
+        draw_delta_panel(
+            &mut grid,
+            &bars,
+            delta_top,
+            delta_rows,
+            gutter,
+            cell,
+            chart_width,
+        );
+    }
+
+    // Optional right-side depth panel.
+    if depth_cols > 0 {
+        if let Some(depth) = &opts.depth {
+            draw_depth_panel(&mut grid, depth, chart_width, depth_cols, plot_top, usable);
+        }
+    }
+
     // Status/title line and time axis.
     let status = compose_status(opts, view.len(), bars.len(), price_min, price_max);
     put_text(&mut grid, 0, title_row, &status);
-    draw_time_axis(&mut grid, &bars, axis_row, gutter, w);
+    draw_time_axis(&mut grid, &bars, axis_row, gutter, chart_width);
 
     grid_to_string(&grid, opts.color)
 }
@@ -320,6 +381,133 @@ fn draw_volume_panel(
     put_label(grid, gutter, vol_top, &fmt_vol(max_vol));
 }
 
+/// Draw an order-flow delta panel: per bar, `delta = buy - sell` as a bar growing
+/// up (green) for positive or down (red) for negative from a center baseline.
+/// Heights scale to the largest |delta| in view. A `─` baseline marks zero, with
+/// the max-|delta| value labeled at the top and `0` at the baseline.
+fn draw_delta_panel(
+    grid: &mut Grid,
+    bars: &[Bar],
+    delta_top: usize,
+    delta_rows: usize,
+    gutter: usize,
+    cell: usize,
+    width: usize,
+) {
+    let baseline = delta_top + delta_rows / 2;
+    // Zero line across the plot area.
+    for col in gutter..width {
+        grid.set_styled(col, baseline, DOJI, CellColor::Default);
+    }
+
+    let max_abs = bars.iter().map(|b| b.delta().abs()).fold(0.0_f64, f64::max);
+    let up_rows = baseline - delta_top;
+    let down_rows = (delta_top + delta_rows - 1) - baseline;
+    let center = cell / 2;
+
+    if max_abs > 0.0 {
+        for (i, bar) in bars.iter().enumerate() {
+            let col = gutter + i * cell + center;
+            let d = bar.delta();
+            let frac = d.abs() / max_abs;
+            if d > 0.0 && up_rows > 0 {
+                let height = ((frac * up_rows as f64).round() as usize).clamp(1, up_rows);
+                for r in 0..height {
+                    grid.set_styled(col, baseline - 1 - r, BULL, CellColor::Green);
+                }
+            } else if d < 0.0 && down_rows > 0 {
+                let height = ((frac * down_rows as f64).round() as usize).clamp(1, down_rows);
+                for r in 0..height {
+                    grid.set_styled(col, baseline + 1 + r, BULL, CellColor::Red);
+                }
+            }
+        }
+    }
+
+    put_label(grid, gutter, delta_top, &fmt_vol(max_abs));
+    put_label(grid, gutter, baseline, "0");
+}
+
+/// Draw a compact Level 2 depth panel in the right strip `[left, left+cols)`:
+/// top-N asks (worst-on-top, red) → spread row → top-N bids (best-on-top, green),
+/// each as `price size` with a mini size bar. Levels are clamped to the rows
+/// available in the `usable`-row band starting at `top`.
+fn draw_depth_panel(
+    grid: &mut Grid,
+    depth: &DepthPanel,
+    left: usize,
+    cols: usize,
+    top: usize,
+    usable: usize,
+) {
+    // Rows: ASK header + spread + BID header are fixed; the rest splits per side.
+    let per_side = usable.saturating_sub(3) / 2;
+    if per_side == 0 {
+        return;
+    }
+    let n = per_side.min(depth.asks.len().max(depth.bids.len()));
+
+    let max_size = depth
+        .bids
+        .iter()
+        .chain(&depth.asks)
+        .map(|&(_, s)| s)
+        .fold(0.0_f64, f64::max);
+
+    let mut row = top;
+    let put = |grid: &mut Grid, text: &str, color: CellColor, row: usize| {
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            grid.set_styled(left + i, row, ch, color);
+        }
+    };
+
+    put(grid, "ASK", CellColor::Default, row);
+    row += 1;
+    // Asks worst-first so the best ask sits just above the spread line.
+    for &(price, size) in depth.asks.iter().take(n).rev() {
+        put(
+            grid,
+            &fmt_depth_level(price, size, max_size, cols),
+            CellColor::Red,
+            row,
+        );
+        row += 1;
+    }
+
+    let spread = depth
+        .spread
+        .map(|s| format!("spr {s:.2}"))
+        .unwrap_or_else(|| "spr  —".to_string());
+    put(grid, &spread, CellColor::Default, row);
+    row += 1;
+
+    // Bids best-first, just below the spread line.
+    for &(price, size) in depth.bids.iter().take(n) {
+        put(
+            grid,
+            &fmt_depth_level(price, size, max_size, cols),
+            CellColor::Green,
+            row,
+        );
+        row += 1;
+    }
+    if row < top + usable {
+        put(grid, "BID", CellColor::Default, row);
+    }
+}
+
+/// Format one depth level as `price size bar` within `cols` columns.
+fn fmt_depth_level(price: f64, size: f64, max_size: f64, cols: usize) -> String {
+    let head = format!("{price:>8.2} {size:>4.0}");
+    let bar_room = cols.saturating_sub(head.chars().count() + 1);
+    let bars = if max_size > 0.0 {
+        ((size / max_size) * bar_room as f64).round() as usize
+    } else {
+        0
+    };
+    format!("{head} {}", "█".repeat(bars.min(bar_room)))
+}
+
 /// Compact volume label, e.g. `8k`, `1.2k`, `500`.
 fn fmt_vol(v: f64) -> String {
     if v >= 1_000.0 {
@@ -411,6 +599,8 @@ mod tests {
             low,
             close,
             volume: 1.0,
+            buy_volume: 0.0,
+            sell_volume: 0.0,
         }
     }
 
@@ -480,6 +670,8 @@ mod tests {
             color: ColorMode::Plain,
             style,
             show_volume: false,
+            show_delta: false,
+            depth: None,
             title: "finchart · SYNTH".to_string(),
         }
     }
@@ -638,5 +830,103 @@ mod tests {
             out.contains("\u{1b}[32m") || out.contains("\u{1b}[31m"),
             "expected colored volume bars"
         );
+    }
+
+    #[test]
+    fn delta_panel_keeps_dimensions() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.show_volume = true;
+        o.show_delta = true;
+        let out = render_chart(&view, &o);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 30);
+        for line in lines {
+            assert_eq!(line.chars().count(), 120);
+        }
+    }
+
+    #[test]
+    fn delta_panel_adds_bars_around_a_baseline() {
+        // OHLC price bars have no blocks; with volume off, any '█' is a delta bar.
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.show_volume = false;
+
+        o.show_delta = false;
+        assert!(
+            !render_chart(&view, &o).contains('█'),
+            "no blocks without delta"
+        );
+
+        o.show_delta = true;
+        let out = render_chart(&view, &o);
+        assert!(out.contains('█'), "delta bars expected");
+        assert!(out.contains('─'), "delta baseline expected");
+    }
+
+    #[test]
+    fn delta_bars_are_colored_in_ansi() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.show_volume = false;
+        o.show_delta = true;
+        o.color = ColorMode::Ansi;
+        let out = render_chart(&view, &o);
+        assert!(
+            out.contains("\u{1b}[32m") || out.contains("\u{1b}[31m"),
+            "expected colored delta bars"
+        );
+    }
+
+    fn depth_panel() -> DepthPanel {
+        DepthPanel {
+            bids: vec![(99.9, 5.0), (99.8, 3.0), (99.7, 2.0)], // best-first (desc)
+            asks: vec![(100.1, 4.0), (100.2, 6.0), (100.3, 1.0)], // best-first (asc)
+            spread: Some(0.2),
+        }
+    }
+
+    #[test]
+    fn depth_panel_keeps_dimensions() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.depth = Some(depth_panel());
+        let out = render_chart(&view, &o);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 30);
+        for line in lines {
+            assert_eq!(line.chars().count(), 120);
+        }
+    }
+
+    #[test]
+    fn depth_panel_shows_labels_and_levels() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.depth = Some(depth_panel());
+        let out = render_chart(&view, &o);
+        assert!(out.contains("ASK"), "missing ASK header");
+        assert!(out.contains("BID"), "missing BID header");
+        assert!(out.contains("spr"), "missing spread row");
+        assert!(out.contains("100.10"), "missing best ask price");
+        assert!(out.contains("99.90"), "missing best bid price");
+    }
+
+    #[test]
+    fn depth_panel_colors_sides_in_ansi() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.depth = Some(depth_panel());
+        o.color = ColorMode::Ansi;
+        let out = render_chart(&view, &o);
+        assert!(out.contains("\u{1b}[32m"), "expected green bids");
+        assert!(out.contains("\u{1b}[31m"), "expected red asks");
     }
 }

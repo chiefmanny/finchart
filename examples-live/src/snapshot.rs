@@ -28,6 +28,11 @@ fn snap_config() -> ReplayConfig {
         ticks_per_candle: 30,
         volume_per_tick: 40.0,
         window: 60,
+        tick_size: 0.05,
+        depth_levels: 12,
+        depth_base_size: 50.0,
+        depth_every: 5,
+        depth_panel_levels: 6,
     }
 }
 
@@ -62,7 +67,8 @@ pub(crate) fn mid_html() -> String {
     html::to_document(&frame_at(advance_points().1, ColorMode::Ansi))
 }
 
-/// Replay statistics with update/render timings (timings vary per run).
+/// Replay statistics with update/render timings (timings vary per run) and the
+/// captured order-flow state.
 pub(crate) struct LiveMetrics {
     history_candles: usize,
     interval_secs: i64,
@@ -73,6 +79,15 @@ pub(crate) struct LiveMetrics {
     render_us: f64,
     chart_width: usize,
     chart_height: usize,
+    buy_volume: f64,
+    sell_volume: f64,
+    current_delta: f64,
+    cumulative_delta: f64,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    spread: Option<f64>,
+    bid_depth_levels: usize,
+    ask_depth_levels: usize,
 }
 
 /// Measure per-tick update time and a single render time for the snapshot run.
@@ -95,6 +110,11 @@ pub(crate) fn measure() -> LiveMetrics {
     let render_us = t.elapsed().as_secs_f64() * 1e6;
     black_box(&frame);
 
+    let flow = replay.current_flow();
+    let buy_volume = flow.map(|f| f.buy_volume).unwrap_or(0.0);
+    let sell_volume = flow.map(|f| f.sell_volume).unwrap_or(0.0);
+    let (bid_depth_levels, ask_depth_levels) = replay.depth_level_counts();
+
     LiveMetrics {
         history_candles: cfg.history,
         interval_secs: cfg.interval_secs,
@@ -105,7 +125,22 @@ pub(crate) fn measure() -> LiveMetrics {
         render_us,
         chart_width: CHART_WIDTH,
         chart_height: CHART_HEIGHT,
+        buy_volume,
+        sell_volume,
+        current_delta: buy_volume - sell_volume,
+        cumulative_delta: replay.cumulative_delta(),
+        best_bid: replay.best_bid(),
+        best_ask: replay.best_ask(),
+        spread: replay.spread(),
+        bid_depth_levels,
+        ask_depth_levels,
     }
+}
+
+/// Format an `Option<f64>` as a JSON number or `null`.
+fn opt_num(v: Option<f64>) -> String {
+    v.map(|x| format!("{x:.3}"))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 /// Serialize metrics as a small, valid JSON object (hand-written; no `serde_json`).
@@ -120,7 +155,16 @@ pub(crate) fn metrics_json(m: &LiveMetrics) -> String {
 \"avg_update_us\": {:.4},\n  \
 \"render_us\": {:.3},\n  \
 \"chart_width\": {},\n  \
-\"chart_height\": {}\n}}\n",
+\"chart_height\": {},\n  \
+\"buy_volume\": {:.3},\n  \
+\"sell_volume\": {:.3},\n  \
+\"current_delta\": {:.3},\n  \
+\"cumulative_delta\": {:.3},\n  \
+\"best_bid\": {},\n  \
+\"best_ask\": {},\n  \
+\"spread\": {},\n  \
+\"bid_depth_levels\": {},\n  \
+\"ask_depth_levels\": {}\n}}\n",
         m.history_candles,
         m.interval_secs,
         m.ticks_per_candle,
@@ -130,6 +174,15 @@ pub(crate) fn metrics_json(m: &LiveMetrics) -> String {
         m.render_us,
         m.chart_width,
         m.chart_height,
+        m.buy_volume,
+        m.sell_volume,
+        m.current_delta,
+        m.cumulative_delta,
+        opt_num(m.best_bid),
+        opt_num(m.best_ask),
+        opt_num(m.spread),
+        m.bid_depth_levels,
+        m.ask_depth_levels,
     )
 }
 
@@ -202,8 +255,50 @@ mod tests {
             "render_us",
             "chart_width",
             "chart_height",
+            "buy_volume",
+            "sell_volume",
+            "current_delta",
+            "cumulative_delta",
         ] {
             assert!(json.contains(field), "metrics.json missing field: {field}");
         }
+    }
+
+    #[test]
+    fn current_delta_matches_buy_minus_sell() {
+        let m = measure();
+        assert!((m.current_delta - (m.buy_volume - m.sell_volume)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn frames_show_the_delta_baseline() {
+        // The delta panel draws a long `─` baseline across the plot; isolated
+        // dojis never produce a run that long.
+        let f = mid_frame_plain();
+        let has_baseline = f
+            .lines()
+            .any(|l| l.chars().filter(|&c| c == '─').count() >= 40);
+        assert!(has_baseline, "no delta baseline row in frame");
+    }
+
+    #[test]
+    fn metrics_json_includes_depth_fields() {
+        let json = metrics_json(&measure());
+        for field in [
+            "best_bid",
+            "best_ask",
+            "spread",
+            "bid_depth_levels",
+            "ask_depth_levels",
+        ] {
+            assert!(json.contains(field), "metrics.json missing field: {field}");
+        }
+    }
+
+    #[test]
+    fn frames_show_the_depth_panel() {
+        let f = mid_frame_plain();
+        assert!(f.contains("ASK"), "missing ASK header");
+        assert!(f.contains("BID"), "missing BID header");
     }
 }

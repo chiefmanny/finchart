@@ -123,8 +123,10 @@ A snapshot is acceptable when:
 
 ## Live replay verification
 
-Proves incremental candle updates: a forming candle updated from synthetic ticks,
-its wick expanding, then closing and rolling into a new candle.
+Proves incremental candle updates, order flow, and Level 2 depth: a forming candle
+updated from synthetic ticks, its wick expanding, then closing and rolling into a
+new candle, with aggressive buy/sell volume tracked into a delta panel and a
+synthetic order book shown in a right-side depth panel.
 
 ```bash
 cargo run -p examples-live --release -- --snapshot artifacts/live
@@ -144,7 +146,11 @@ chart. Three frames are captured at fixed tick offsets around a candle boundary
 | `frame.mid.plain.txt` | Same candle half formed — wick has expanded. |
 | `frame.after.plain.txt` | The candle has closed; a new one just opened. |
 | `frame.mid.html` | The mid frame as a self-contained HTML page (shared `backend_terminal::html`). |
-| `metrics.json` | `history_candles`, `interval_secs`, `ticks_per_candle`, `total_ticks`, `frames`, `avg_update_us`, `render_us`, chart dims. |
+| `metrics.json` | Replay stats + order flow + depth: `history_candles`, `interval_secs`, `ticks_per_candle`, `total_ticks`, `frames`, `avg_update_us`, `render_us`, chart dims, `buy_volume`, `sell_volume`, `current_delta`, `cumulative_delta`, `best_bid`, `best_ask`, `spread`, `bid_depth_levels`, `ask_depth_levels`. |
+
+The frames render with the **delta panel** (price + volume + order-flow delta) and
+a right-side **depth panel** (top bid/ask ladder + spread); the status line carries
+the current candle's `Δ`/`CVD` and the book's `bid`/`ask`/`spr`.
 
 ### Acceptance criteria
 
@@ -158,6 +164,19 @@ chart. Three frames are captured at fixed tick offsets around a candle boundary
       ```
 - [ ] **Roll-over happened.** The `after` frame's forming candle `open` equals the
       prior candle's close, and its tick count crossed an interval boundary.
+- [ ] **Order flow is tracked.** The status line shows `Δ` and `CVD`, the frames
+      draw a delta panel (a long `─` baseline with green-up / red-down bars), and
+      `metrics.json` reports the flow fields with `current_delta == buy − sell`:
+      ```bash
+      grep -E '"buy_volume"|"sell_volume"|"current_delta"|"cumulative_delta"' artifacts/live/metrics.json
+      ```
+- [ ] **Depth is tracked.** The status line shows `bid`/`ask`/`spr`, the frames draw
+      a right-side depth panel (`ASK`/`BID` headers, a non-crossing ladder, `spr`
+      row), and `metrics.json` reports the book fields:
+      ```bash
+      grep -E '"best_bid"|"best_ask"|"spread"|"bid_depth_levels"|"ask_depth_levels"' artifacts/live/metrics.json
+      # best_bid < best_ask; spread == best_ask - best_bid
+      ```
 - [ ] **Deterministic for the same seed** — frame text is byte-identical across runs:
       ```bash
       cp artifacts/live/frame.mid.plain.txt /tmp/prev.txt
@@ -189,6 +208,17 @@ Runs the full workspace suite, including:
   candle, same-seed tick streams and replays are deterministic, viewport follows
   the latest candle (`Viewport::tail`), and the live snapshot frames are
   byte-deterministic with the required `metrics.json` fields.
+- **Order flow** (`market-core` + `render-core` + `backend-terminal` +
+  `examples-live`): buy/sell volume accumulate by aggressor side, `delta = buy −
+  sell`, rollover preserves a closed candle's flow, history flow sums to volume and
+  skews with direction, flow is conserved through cull+aggregate, the delta panel
+  keeps fixed dimensions with a baseline, and the live `metrics.json` carries the
+  order-flow fields.
+- **Depth** (`market-core` + `backend-terminal` + `examples-live`): order-book
+  snapshot/update/delete, best bid/ask, spread, `top_n` sorting; deterministic
+  synthetic depth that stays non-crossing with positive sizes; the depth panel
+  keeps fixed dimensions; the replay book stays non-crossing and the live
+  `metrics.json` carries the depth fields.
 
 ## Suggested loop after a renderer change
 

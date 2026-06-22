@@ -94,6 +94,8 @@ pub struct CulledView<'a> {
     pub low: &'a [f64],
     pub close: &'a [f64],
     pub volume: &'a [f64],
+    pub buy: &'a [f64],
+    pub sell: &'a [f64],
 }
 
 impl CulledView<'_> {
@@ -132,7 +134,9 @@ pub fn cull<'a>(series: &'a CandleSeries, vp: &Viewport) -> CulledView<'a> {
         high: &series.high()[r.clone()],
         low: &series.low()[r.clone()],
         close: &series.close()[r.clone()],
-        volume: &series.volume()[r],
+        volume: &series.volume()[r.clone()],
+        buy: &series.buy_volume()[r.clone()],
+        sell: &series.sell_volume()[r],
     }
 }
 
@@ -314,5 +318,15 @@ mod tests {
     fn tail_handles_empty_and_zero_window() {
         assert_eq!(Viewport::tail(0, 20), Viewport::new(0, 0));
         assert_eq!(Viewport::tail(100, 0), Viewport::new(100, 100));
+    }
+
+    #[test]
+    fn cull_exposes_flow_slices() {
+        let s = series(1_000);
+        let view = cull(&s, &Viewport::new(100, 150));
+        assert_eq!(view.buy.len(), 50);
+        assert_eq!(view.sell.len(), 50);
+        assert_eq!(view.buy[0], s.buy_volume()[100]);
+        assert_eq!(view.sell[49], s.sell_volume()[149]);
     }
 }

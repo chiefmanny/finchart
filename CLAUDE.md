@@ -8,10 +8,14 @@ Guidance for working in this repo.
 covers the **MVP** (synthetic OHLCV → viewport culling → terminal rendering →
 benchmarks), **Terminal Renderer V2** (OHLC/candle styles, display-resolution LOD
 aggregation, a laid-out chart with title/gutter/volume/time-axis, interactive
-viewer), and **Live Replay** (incremental candle building from synthetic ticks —
+viewer), **Live Replay** (incremental candle building from synthetic ticks —
 update the forming candle, roll over at interval boundaries, follow the latest
-candle live). See `docs/mvp.md`, `docs/mvp-implementation-plan.md`,
-`docs/terminal-renderer-v2-plan.md`, and `docs/live-replay-plan.md`.
+candle live), **Order-Flow V1** (aggressive buy/sell volume, per-candle delta,
+cumulative delta, and a terminal delta panel), and **Depth V1** (a Level 2 order
+book, synthetic depth generation, and a right-side terminal depth panel). See
+`docs/mvp.md`, `docs/mvp-implementation-plan.md`,
+`docs/terminal-renderer-v2-plan.md`, `docs/live-replay-plan.md`,
+`docs/order-flow-v1-plan.md`, and `docs/depth-v1-plan.md`.
 
 The broader vision (trades, order-book depth, footprint/heatmap, Canvas/WebGPU
 backends, live feeds) is described in `README.md` / `docs/research.md` but is
@@ -38,7 +42,7 @@ reproducible benchmarks (not gitignored).
 
 ```text
 crates/
-  market-core/       # Candle, columnar CandleSeries, synth generator, live Tick/CandleBuilder, SplitMix64 RNG
+  market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook, SplitMix64 RNG
   render-core/       # Viewport (+ pan/zoom/tail), cull -> CulledView (zero-copy), aggregate -> LOD Bars, scales
   backend-terminal/  # render_chart: laid-out OHLC/candle chart (LOD, volume, axes); html export; pure
 examples-bench/      # binary: demo chart + benchmark table + deterministic snapshot export
@@ -71,6 +75,27 @@ The example binaries depend on all three. `crossterm` is used **only** by
   candle is just the last bar, so `render_chart`/LOD/follow all work unchanged.
   `synth::ticks(LiveConfig)` is the deterministic synthetic tick source;
   `Viewport::tail` follows the newest candle.
+- **Order flow.** `CandleSeries` carries `buy_volume`/`sell_volume` columns
+  (delta = buy − sell, *derived* not stored); `add_flow_last` accumulates them and
+  `update_last` leaves them intact. `CandleBuilder::apply` routes each tick's size
+  by `tick.side` (`Side::Buy`/`Sell` = aggressor; `None` = volume only); it also
+  exposes `current_flow()` and `cumulative_delta()` (CVD). Flow rides the same
+  path: `CulledView` has `buy`/`sell` slices, `Bar` has `buy_volume`/`sell_volume`
+  + `delta()`, and `render_chart`'s `show_delta` panel draws per-bar delta as
+  green-up / red-down bars around a `─` baseline. `generate()` fills history flow
+  from a separate RNG stream (so OHLCV bytes are unchanged), skewed by candle
+  direction.
+- **Level 2 depth.** `market_core::OrderBook` is keyed by integer price *ticks*
+  (`round(price / tick_size)` → `BTreeMap<i64, f64>` per side), so levels match
+  exactly across updates and each side stays sorted for free; prices are `f64` at
+  the API. It's a faithful feed mirror: `apply_snapshot`/`apply_update`
+  (`size == 0` deletes), `best_bid`/`best_ask`/`spread`/`best_bid_ask`, `top_n`
+  (best-first), `level_counts`. Neutral events: `DepthSnapshot`, `DepthUpdate`,
+  `DepthLevel`, `BookSide`, `BestBidAsk`. `synth::DepthGen` produces a
+  deterministic non-crossing ladder around a mid plus liquidity-shifting updates.
+  `render_chart`'s `depth: Option<DepthPanel>` draws a fixed-width right-side
+  ladder (top asks / spread / top bids) — total dimensions stay `width × height`.
+  Not a heatmap.
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.
@@ -113,8 +138,12 @@ logic lives in `examples-bench/src/snapshot.rs`; JSON is hand-written (no
 fixed config + fixed advance points capture a forming candle just opened
 (`frame.before.plain.txt`), half formed with an expanded wick
 (`frame.mid.plain.txt`), and after roll-over (`frame.after.plain.txt`), plus
-`frame.mid.html` and `metrics.json` (update/render timings). The three frame
-texts are byte-deterministic; timings are not. Logic lives in
+`frame.mid.html` and `metrics.json`. The frames render the **delta panel** and a
+right-side **depth panel** (the status line shows `Δ`/`CVD` and `bid`/`ask`/`spr`);
+`metrics.json` adds order-flow fields (`buy_volume`, `sell_volume`,
+`current_delta`, `cumulative_delta`) and depth fields (`best_bid`, `best_ask`,
+`spread`, `bid_depth_levels`, `ask_depth_levels`) on top of update/render timings.
+The three frame texts are byte-deterministic; timings are not. Logic lives in
 `examples-live/src/snapshot.rs`; HTML uses the shared `backend_terminal::html`.
 
 See `docs/verification.md` for the full workflow and acceptance criteria.

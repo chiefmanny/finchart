@@ -8,22 +8,41 @@
 
 use crate::candle::{Candle, CandleSeries};
 
-/// Aggressor side of a trade, when known.
+/// Aggressor side of an executed trade.
+///
+/// `Buy` = buyer-initiated (aggressive) trade — its size adds to buy volume.
+/// `Sell` = seller-initiated — its size adds to sell volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Buy,
     Sell,
 }
 
-/// A single trade / price tick.
+/// A single executed trade.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tick {
     /// Event time (epoch seconds).
     pub ts: i64,
     pub price: f64,
-    /// Traded size; added to the forming candle's volume.
+    /// Traded size; added to the forming candle's total volume, and to buy/sell
+    /// volume according to [`side`](Tick::side).
     pub size: f64,
+    /// Aggressor side; `None` counts toward total volume only (no flow).
     pub side: Option<Side>,
+}
+
+/// Aggressive buy/sell volume for one candle. Per-candle delta is `buy - sell`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flow {
+    pub buy_volume: f64,
+    pub sell_volume: f64,
+}
+
+impl Flow {
+    /// Order-flow delta: buy volume minus sell volume.
+    pub fn delta(&self) -> f64 {
+        self.buy_volume - self.sell_volume
+    }
 }
 
 /// What ingesting a tick did to the candle series.
@@ -87,6 +106,30 @@ impl CandleBuilder {
         }
     }
 
+    /// Aggressive buy/sell volume of the forming candle, or `None` before the
+    /// first tick.
+    pub fn current_flow(&self) -> Option<Flow> {
+        if !self.forming {
+            return None;
+        }
+        let i = self.series.len().checked_sub(1)?;
+        Some(Flow {
+            buy_volume: self.series.buy_volume()[i],
+            sell_volume: self.series.sell_volume()[i],
+        })
+    }
+
+    /// Cumulative volume delta (CVD): running sum of `buy - sell` over every
+    /// candle in the series (closed history + forming).
+    pub fn cumulative_delta(&self) -> f64 {
+        self.series
+            .buy_volume()
+            .iter()
+            .zip(self.series.sell_volume())
+            .map(|(b, s)| b - s)
+            .sum()
+    }
+
     /// Ingest a tick, mutating the forming candle (or rolling to a new one).
     pub fn ingest(&mut self, tick: Tick) -> CandleUpdate {
         if !self.forming {
@@ -130,7 +173,8 @@ impl CandleBuilder {
         });
     }
 
-    /// Fold `tick` into the forming candle.
+    /// Fold `tick` into the forming candle: update OHLCV, then route the size to
+    /// buy/sell volume by aggressor side.
     fn apply(&mut self, tick: Tick) {
         let mut c = self.series.last().expect("forming candle exists");
         c.high = c.high.max(tick.price);
@@ -138,6 +182,12 @@ impl CandleBuilder {
         c.close = tick.price;
         c.volume += tick.size;
         self.series.update_last(c);
+
+        match tick.side {
+            Some(Side::Buy) => self.series.add_flow_last(tick.size, 0.0),
+            Some(Side::Sell) => self.series.add_flow_last(0.0, tick.size),
+            None => {}
+        }
     }
 }
 
@@ -268,5 +318,76 @@ mod tests {
             assert!(c.high >= c.low, "high<low: {c:?}");
             assert!(c.volume >= 0.0, "negative volume: {c:?}");
         }
+    }
+
+    // --- order flow ----------------------------------------------------------
+
+    fn sided(ts: i64, price: f64, size: f64, side: Side) -> Tick {
+        Tick {
+            ts,
+            price,
+            size,
+            side: Some(side),
+        }
+    }
+
+    #[test]
+    fn current_flow_is_none_before_first_tick() {
+        let b = CandleBuilder::from_history(history(100.0), 60);
+        assert_eq!(b.current_flow(), None);
+    }
+
+    #[test]
+    fn buy_and_sell_volume_accumulate_by_side() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(sided(60, 101.0, 10.0, Side::Buy));
+        b.ingest(sided(63, 99.0, 4.0, Side::Sell));
+        b.ingest(sided(66, 102.0, 6.0, Side::Buy));
+
+        let f = b.current_flow().unwrap();
+        assert_eq!(f.buy_volume, 16.0);
+        assert_eq!(f.sell_volume, 4.0);
+        assert_eq!(f.delta(), 12.0);
+        // Total volume still accumulates everything.
+        assert_eq!(b.current().unwrap().volume, 20.0);
+    }
+
+    #[test]
+    fn unsided_tick_counts_volume_but_not_flow() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(sided(60, 101.0, 10.0, Side::Buy));
+        b.ingest(tick(63, 100.0, 5.0)); // side: None
+
+        let f = b.current_flow().unwrap();
+        assert_eq!(f.buy_volume, 10.0);
+        assert_eq!(f.sell_volume, 0.0);
+        assert_eq!(b.current().unwrap().volume, 15.0);
+    }
+
+    #[test]
+    fn rollover_preserves_closed_candle_flow() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(sided(60, 101.0, 10.0, Side::Buy));
+        b.ingest(sided(63, 99.0, 4.0, Side::Sell));
+        b.ingest(sided(66, 102.0, 6.0, Side::Buy));
+
+        b.ingest(sided(120, 103.0, 5.0, Side::Buy)); // rolls over
+
+        // The closed candle (index 1) keeps its flow stats.
+        assert_eq!(b.series().buy_volume()[1], 16.0);
+        assert_eq!(b.series().sell_volume()[1], 4.0);
+        // The new forming candle starts fresh.
+        let f = b.current_flow().unwrap();
+        assert_eq!(f.buy_volume, 5.0);
+        assert_eq!(f.sell_volume, 0.0);
+    }
+
+    #[test]
+    fn cumulative_delta_sums_across_candles() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(sided(60, 101.0, 10.0, Side::Buy));
+        b.ingest(sided(63, 99.0, 4.0, Side::Sell)); // candle delta +6
+        b.ingest(sided(120, 103.0, 5.0, Side::Buy)); // rolls; new candle delta +5
+        assert_eq!(b.cumulative_delta(), 11.0);
     }
 }

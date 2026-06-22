@@ -51,6 +51,8 @@ fn demo_chart(width: usize, height: usize, color: ColorMode) -> String {
             color,
             style: Style::OhlcBars,
             show_volume: true,
+            show_delta: false,
+            depth: None,
             title: "finchart · SYNTH".to_string(),
         },
     )
@@ -109,6 +111,8 @@ fn bench_one(size: usize, gen_reps: usize, hot_reps: usize) -> BenchResult {
         color: ColorMode::Plain,
         style: Style::OhlcBars,
         show_volume: false,
+        show_delta: false,
+        depth: None,
         title: String::new(),
     };
     let mut render_total = Duration::ZERO;
