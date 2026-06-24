@@ -33,6 +33,7 @@ fn snap_config() -> ReplayConfig {
         depth_base_size: 50.0,
         depth_every: 5,
         depth_panel_levels: 6,
+        heatmap_time_buckets: 160,
     }
 }
 
@@ -88,6 +89,10 @@ pub(crate) struct LiveMetrics {
     spread: Option<f64>,
     bid_depth_levels: usize,
     ask_depth_levels: usize,
+    heatmap_time_buckets: usize,
+    heatmap_price_buckets: usize,
+    visible_heatmap_cells: usize,
+    max_liquidity: f64,
 }
 
 /// Measure per-tick update time and a single render time for the snapshot run.
@@ -134,6 +139,10 @@ pub(crate) fn measure() -> LiveMetrics {
         spread: replay.spread(),
         bid_depth_levels,
         ask_depth_levels,
+        heatmap_time_buckets: replay.heatmap_time_buckets(),
+        heatmap_price_buckets: replay.heatmap_price_buckets(),
+        visible_heatmap_cells: replay.visible_heatmap_cells(),
+        max_liquidity: replay.max_liquidity(),
     }
 }
 
@@ -164,7 +173,11 @@ pub(crate) fn metrics_json(m: &LiveMetrics) -> String {
 \"best_ask\": {},\n  \
 \"spread\": {},\n  \
 \"bid_depth_levels\": {},\n  \
-\"ask_depth_levels\": {}\n}}\n",
+\"ask_depth_levels\": {},\n  \
+\"heatmap_time_buckets\": {},\n  \
+\"heatmap_price_buckets\": {},\n  \
+\"visible_heatmap_cells\": {},\n  \
+\"max_liquidity\": {:.3}\n}}\n",
         m.history_candles,
         m.interval_secs,
         m.ticks_per_candle,
@@ -183,6 +196,10 @@ pub(crate) fn metrics_json(m: &LiveMetrics) -> String {
         opt_num(m.spread),
         m.bid_depth_levels,
         m.ask_depth_levels,
+        m.heatmap_time_buckets,
+        m.heatmap_price_buckets,
+        m.visible_heatmap_cells,
+        m.max_liquidity,
     )
 }
 
@@ -300,5 +317,29 @@ mod tests {
         let f = mid_frame_plain();
         assert!(f.contains("ASK"), "missing ASK header");
         assert!(f.contains("BID"), "missing BID header");
+    }
+
+    #[test]
+    fn metrics_json_includes_heatmap_fields() {
+        let json = metrics_json(&measure());
+        for field in [
+            "heatmap_time_buckets",
+            "heatmap_price_buckets",
+            "visible_heatmap_cells",
+            "max_liquidity",
+        ] {
+            assert!(json.contains(field), "metrics.json missing field: {field}");
+        }
+    }
+
+    #[test]
+    fn frames_show_the_heatmap_layer() {
+        // Shade glyphs are heatmap-only here (OHLC bars don't use them, and `·`
+        // appears in the status line so it's excluded).
+        let f = mid_frame_plain();
+        assert!(
+            f.chars().any(|c| matches!(c, '░' | '▒' | '▓')),
+            "no heatmap shade glyphs in frame"
+        );
     }
 }

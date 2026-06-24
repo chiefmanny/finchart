@@ -11,11 +11,13 @@ aggregation, a laid-out chart with title/gutter/volume/time-axis, interactive
 viewer), **Live Replay** (incremental candle building from synthetic ticks —
 update the forming candle, roll over at interval boundaries, follow the latest
 candle live), **Order-Flow V1** (aggressive buy/sell volume, per-candle delta,
-cumulative delta, and a terminal delta panel), and **Depth V1** (a Level 2 order
-book, synthetic depth generation, and a right-side terminal depth panel). See
-`docs/mvp.md`, `docs/mvp-implementation-plan.md`,
+cumulative delta, and a terminal delta panel), **Depth V1** (a Level 2 order book,
+synthetic depth generation, and a right-side terminal depth panel), and
+**Heatmap V1** (a bounded depth-history store and a coarse terminal liquidity
+heatmap layer). See `docs/mvp.md`, `docs/mvp-implementation-plan.md`,
 `docs/terminal-renderer-v2-plan.md`, `docs/live-replay-plan.md`,
-`docs/order-flow-v1-plan.md`, and `docs/depth-v1-plan.md`.
+`docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`, and
+`docs/heatmap-v1-plan.md`.
 
 The broader vision (trades, order-book depth, footprint/heatmap, Canvas/WebGPU
 backends, live feeds) is described in `README.md` / `docs/research.md` but is
@@ -42,7 +44,7 @@ reproducible benchmarks (not gitignored).
 
 ```text
 crates/
-  market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook, SplitMix64 RNG
+  market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook + LiquidityHeatmap, RNG
   render-core/       # Viewport (+ pan/zoom/tail), cull -> CulledView (zero-copy), aggregate -> LOD Bars, scales
   backend-terminal/  # render_chart: laid-out OHLC/candle chart (LOD, volume, axes); html export; pure
 examples-bench/      # binary: demo chart + benchmark table + deterministic snapshot export
@@ -95,7 +97,16 @@ The example binaries depend on all three. `crossterm` is used **only** by
   deterministic non-crossing ladder around a mid plus liquidity-shifting updates.
   `render_chart`'s `depth: Option<DepthPanel>` draws a fixed-width right-side
   ladder (top asks / spread / top bids) — total dimensions stay `width × height`.
-  Not a heatmap.
+- **Liquidity heatmap.** `market_core::LiquidityHeatmap` is a bounded rolling
+  window (`VecDeque`) of time-bucket columns, each a `BTreeMap<i64, f64>` of
+  combined (bid+ask) liquidity per price *tick* — absolute keys, so price drift is
+  handled and price→row bucketing happens at render time. `record(&book, ts)`
+  snapshots the book each depth step; accessors give `time_buckets`,
+  `price_buckets`, `max_liquidity`, `cells_in_price_range`, and `columns_in_range`
+  (render export). `render_chart`'s `heatmap: Option<HeatmapView>` draws a coarse
+  `· ░ ▒ ▓ █` intensity **background layer** (newest column → rightmost) *before*
+  the bars, so candles draw on top; dimensions stay `width × height`. Not a
+  footprint chart.
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.
@@ -140,10 +151,12 @@ fixed config + fixed advance points capture a forming candle just opened
 (`frame.mid.plain.txt`), and after roll-over (`frame.after.plain.txt`), plus
 `frame.mid.html` and `metrics.json`. The frames render the **delta panel** and a
 right-side **depth panel** (the status line shows `Δ`/`CVD` and `bid`/`ask`/`spr`);
-`metrics.json` adds order-flow fields (`buy_volume`, `sell_volume`,
-`current_delta`, `cumulative_delta`) and depth fields (`best_bid`, `best_ask`,
-`spread`, `bid_depth_levels`, `ask_depth_levels`) on top of update/render timings.
-The three frame texts are byte-deterministic; timings are not. Logic lives in
+a **heatmap** background layer; `metrics.json` adds order-flow fields
+(`buy_volume`, `sell_volume`, `current_delta`, `cumulative_delta`), depth fields
+(`best_bid`, `best_ask`, `spread`, `bid_depth_levels`, `ask_depth_levels`), and
+heatmap fields (`heatmap_time_buckets`, `heatmap_price_buckets`,
+`visible_heatmap_cells`, `max_liquidity`) on top of update/render timings. The
+three frame texts are byte-deterministic; timings are not. Logic lives in
 `examples-live/src/snapshot.rs`; HTML uses the shared `backend_terminal::html`.
 
 See `docs/verification.md` for the full workflow and acceptance criteria.

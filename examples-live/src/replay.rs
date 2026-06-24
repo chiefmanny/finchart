@@ -2,10 +2,10 @@
 //! deterministic synthetic tick stream into candles, and render a follow-latest
 //! frame. All logic here is unit-testable without a TTY.
 
-use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, Style};
+use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};
 use market_core::{
     generate, ticks, BookSide, Candle, CandleBuilder, DepthConfig, DepthGen, Flow, GenConfig,
-    LiveConfig, OrderBook, TickStream,
+    LiquidityHeatmap, LiveConfig, OrderBook, TickStream,
 };
 use render_core::{cull, Viewport};
 
@@ -39,6 +39,8 @@ pub struct ReplayConfig {
     pub depth_every: usize,
     /// Levels shown per side in the depth panel.
     pub depth_panel_levels: usize,
+    /// Heatmap rolling-window capacity (time buckets).
+    pub heatmap_time_buckets: usize,
 }
 
 impl Default for ReplayConfig {
@@ -59,6 +61,7 @@ impl Default for ReplayConfig {
             depth_base_size: 50.0,
             depth_every: 5,
             depth_panel_levels: 6,
+            heatmap_time_buckets: 160,
         }
     }
 }
@@ -74,6 +77,7 @@ pub struct Replay {
     depth: DepthGen,
     depth_every: usize,
     depth_panel_levels: usize,
+    heatmap: LiquidityHeatmap,
 }
 
 impl Replay {
@@ -121,6 +125,10 @@ impl Replay {
         let mut book = OrderBook::new(cfg.tick_size);
         book.apply_snapshot(&depth.snapshot(live_ts, live_price));
 
+        // Liquidity heatmap, seeded with the initial book.
+        let mut heatmap = LiquidityHeatmap::new(cfg.tick_size, cfg.heatmap_time_buckets);
+        heatmap.record(&book, live_ts);
+
         Self {
             builder,
             stream,
@@ -130,10 +138,12 @@ impl Replay {
             depth,
             depth_every: cfg.depth_every.max(1),
             depth_panel_levels: cfg.depth_panel_levels,
+            heatmap,
         }
     }
 
-    /// Ingest the next `n` ticks, stepping the order book every `depth_every`.
+    /// Ingest the next `n` ticks, stepping the order book and recording the
+    /// heatmap every `depth_every`.
     pub fn advance(&mut self, n: usize) {
         for _ in 0..n {
             if let Some(tick) = self.stream.next() {
@@ -141,6 +151,7 @@ impl Replay {
                 self.total_ticks += 1;
                 if self.total_ticks.is_multiple_of(self.depth_every) {
                     self.depth.step(&mut self.book, tick.ts, tick.price);
+                    self.heatmap.record(&self.book, tick.ts);
                 }
             }
         }
@@ -169,6 +180,7 @@ impl Replay {
                 show_volume: true,
                 show_delta: true,
                 depth: Some(self.depth_panel()),
+                heatmap: Some(self.heatmap_view()),
                 title: title.to_string(),
             },
         )
@@ -189,6 +201,41 @@ impl Replay {
     /// `(bid_levels, ask_levels)` resting in the book.
     pub fn depth_level_counts(&self) -> (usize, usize) {
         self.book.level_counts()
+    }
+
+    /// The visible price band (from the follow-latest viewport), if any.
+    fn visible_price_extent(&self) -> Option<(f64, f64)> {
+        cull(self.builder.series(), &self.viewport()).price_extent()
+    }
+
+    /// Largest single-cell liquidity in the heatmap window.
+    pub fn max_liquidity(&self) -> f64 {
+        self.heatmap.max_liquidity()
+    }
+
+    /// Time buckets currently held in the heatmap window.
+    pub fn heatmap_time_buckets(&self) -> usize {
+        self.heatmap.time_buckets()
+    }
+
+    /// Distinct price buckets across the heatmap window.
+    pub fn heatmap_price_buckets(&self) -> usize {
+        self.heatmap.price_buckets()
+    }
+
+    /// Populated heatmap cells within the visible price band.
+    pub fn visible_heatmap_cells(&self) -> usize {
+        let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
+        self.heatmap.cells_in_price_range(lo, hi)
+    }
+
+    /// A render-ready heatmap view over the visible price band.
+    pub fn heatmap_view(&self) -> HeatmapView {
+        let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
+        HeatmapView {
+            columns: self.heatmap.columns_in_range(lo, hi),
+            max_liquidity: self.max_liquidity(),
+        }
     }
 
     /// A render-ready depth view: top-`depth_panel_levels` bids/asks + spread.
@@ -224,7 +271,7 @@ impl Replay {
     pub fn status(&self) -> String {
         match (self.current(), self.current_flow()) {
             (Some(c), Some(f)) => format!(
-                "finchart LIVE · O {:.2} H {:.2} L {:.2} C {:.2} · Δ {:+.0} · CVD {:+.0} · {} · ticks {}",
+                "finchart LIVE · O {:.2} H {:.2} L {:.2} C {:.2} · Δ {:+.0} · CVD {:+.0} · {} · liq {:.0} cells {} · ticks {}",
                 c.open,
                 c.high,
                 c.low,
@@ -232,6 +279,8 @@ impl Replay {
                 f.delta(),
                 self.cumulative_delta(),
                 self.book_status(),
+                self.max_liquidity(),
+                self.visible_heatmap_cells(),
                 self.total_ticks()
             ),
             _ => "finchart LIVE · warming up".to_string(),
@@ -360,5 +409,31 @@ mod tests {
             d.asks.windows(2).all(|w| w[0].0 < w[1].0),
             "asks not ascending"
         );
+    }
+
+    #[test]
+    fn heatmap_is_populated_after_replay() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        assert!(r.max_liquidity() > 0.0, "heatmap has no liquidity");
+        assert!(r.visible_heatmap_cells() > 0, "no visible heatmap cells");
+    }
+
+    #[test]
+    fn status_includes_liquidity_and_cells() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        let s = r.status();
+        assert!(s.contains("liq"), "missing liq: {s}");
+        assert!(s.contains("cells"), "missing cells: {s}");
+    }
+
+    #[test]
+    fn heatmap_view_has_columns() {
+        let mut r = Replay::new(&cfg());
+        r.advance(500);
+        let hv = r.heatmap_view();
+        assert!(!hv.columns.is_empty(), "no heatmap columns");
+        assert!(hv.max_liquidity > 0.0);
     }
 }

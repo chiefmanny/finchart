@@ -125,6 +125,15 @@ pub struct DepthPanel {
     pub spread: Option<f64>,
 }
 
+/// A render-ready liquidity heatmap: `columns` oldest→newest, each a list of
+/// `(price, liquidity)` levels, plus the max-liquidity scale. Decoupled (plain
+/// tuples) from the heatmap store.
+#[derive(Debug, Clone, Default)]
+pub struct HeatmapView {
+    pub columns: Vec<Vec<(f64, f64)>>,
+    pub max_liquidity: f64,
+}
+
 /// Options for [`render_chart`].
 #[derive(Debug, Clone)]
 pub struct ChartOptions {
@@ -138,6 +147,8 @@ pub struct ChartOptions {
     pub show_delta: bool,
     /// Optional Level 2 depth shown in a right-side panel.
     pub depth: Option<DepthPanel>,
+    /// Optional liquidity heatmap drawn as a background layer in the price plot.
+    pub heatmap: Option<HeatmapView>,
     /// Status-line prefix label (e.g. `finchart · SYNTH`); may be empty.
     pub title: String,
 }
@@ -152,6 +163,7 @@ impl Default for ChartOptions {
             show_volume: false,
             show_delta: false,
             depth: None,
+            heatmap: None,
             title: String::new(),
         }
     }
@@ -222,6 +234,13 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
 
     let ps = PriceScale::new(price_min, price_max, plot_rows);
     let mut grid = Grid::new(w, h);
+
+    // Background layer: liquidity heatmap drawn before the bars so candles sit on top.
+    if let Some(heatmap) = &opts.heatmap {
+        draw_heatmap(
+            &mut grid, heatmap, gutter, plot_cols, plot_top, plot_rows, &ps,
+        );
+    }
 
     // Plot: one bar per aggregated bucket, left-aligned at a fixed cell stride.
     for (i, bar) in bars.iter().enumerate() {
@@ -426,6 +445,57 @@ fn draw_delta_panel(
 
     put_label(grid, gutter, delta_top, &fmt_vol(max_abs));
     put_label(grid, gutter, baseline, "0");
+}
+
+/// Coarse liquidity intensity ramp (low → high).
+const HEAT_RAMP: [char; 5] = ['·', '░', '▒', '▓', '█'];
+
+/// The glyph for a liquidity fraction in `[0, 1]`, or `None` for empty.
+fn heat_glyph(frac: f64) -> Option<char> {
+    if frac <= 0.0 {
+        return None;
+    }
+    let idx = ((frac * HEAT_RAMP.len() as f64).ceil() as usize).clamp(1, HEAT_RAMP.len());
+    Some(HEAT_RAMP[idx - 1])
+}
+
+/// Draw the liquidity heatmap as a background layer across the plot. Columns map
+/// newest→rightmost (follow-latest); each level's liquidity accumulates into its
+/// price row via `ps`, then a coarse intensity glyph is written.
+fn draw_heatmap(
+    grid: &mut Grid,
+    heatmap: &HeatmapView,
+    gutter: usize,
+    plot_cols: usize,
+    plot_top: usize,
+    plot_rows: usize,
+    ps: &PriceScale,
+) {
+    if heatmap.max_liquidity <= 0.0 || heatmap.columns.is_empty() || plot_rows == 0 {
+        return;
+    }
+    let ncols = heatmap.columns.len() as isize;
+    for c in 0..plot_cols {
+        // Rightmost plot column shows the newest heatmap column.
+        let hi = c as isize + ncols - plot_cols as isize;
+        if hi < 0 {
+            continue;
+        }
+        let column = &heatmap.columns[hi as usize];
+
+        let mut row_liq = vec![0.0; plot_rows];
+        for &(price, liq) in column {
+            let r = ps.price_to_row(price);
+            if r >= 0 && (r as usize) < plot_rows {
+                row_liq[r as usize] += liq;
+            }
+        }
+        for (r, &liq) in row_liq.iter().enumerate() {
+            if let Some(glyph) = heat_glyph(liq / heatmap.max_liquidity) {
+                grid.set_styled(gutter + c, plot_top + r, glyph, CellColor::Default);
+            }
+        }
+    }
 }
 
 /// Draw a compact Level 2 depth panel in the right strip `[left, left+cols)`:
@@ -672,6 +742,7 @@ mod tests {
             show_volume: false,
             show_delta: false,
             depth: None,
+            heatmap: None,
             title: "finchart · SYNTH".to_string(),
         }
     }
@@ -928,5 +999,65 @@ mod tests {
         let out = render_chart(&view, &o);
         assert!(out.contains("\u{1b}[32m"), "expected green bids");
         assert!(out.contains("\u{1b}[31m"), "expected red asks");
+    }
+
+    /// A synthetic heatmap spanning the view's price range with a liquidity
+    /// gradient (so the full intensity ramp appears).
+    fn heatmap_for(view: &render_core::CulledView) -> HeatmapView {
+        let (lo, hi) = view.price_extent().unwrap();
+        let rows = 30usize;
+        let columns: Vec<Vec<(f64, f64)>> = (0..130)
+            .map(|_| {
+                (0..rows)
+                    .map(|k| {
+                        let price = lo + (hi - lo) * k as f64 / (rows as f64 - 1.0);
+                        (price, k as f64 + 1.0)
+                    })
+                    .collect()
+            })
+            .collect();
+        HeatmapView {
+            columns,
+            max_liquidity: rows as f64,
+        }
+    }
+
+    #[test]
+    fn heatmap_keeps_dimensions() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        let out = render_chart(&view, &o);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 30);
+        for line in lines {
+            assert_eq!(line.chars().count(), 120);
+        }
+    }
+
+    #[test]
+    fn heatmap_draws_intensity_glyphs() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        let out = render_chart(&view, &o);
+        assert!(
+            out.contains('░') || out.contains('▒') || out.contains('▓'),
+            "expected heatmap intensity glyphs"
+        );
+    }
+
+    #[test]
+    fn candles_render_over_heatmap() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        let out = render_chart(&view, &o);
+        // Both layers present: heatmap background glyph and candle wick on top.
+        assert!(out.contains('▓'), "expected heatmap background");
+        assert!(out.contains('│'), "expected candle bars over the heatmap");
     }
 }

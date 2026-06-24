@@ -107,6 +107,7 @@ impl App {
                 show_volume: true,
                 show_delta: false,
                 depth: None,
+                heatmap: None,
                 title: "finchart · h/l pan · k/j zoom · r reset · q quit".to_string(),
             },
         )

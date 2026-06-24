@@ -123,10 +123,11 @@ A snapshot is acceptable when:
 
 ## Live replay verification
 
-Proves incremental candle updates, order flow, and Level 2 depth: a forming candle
-updated from synthetic ticks, its wick expanding, then closing and rolling into a
-new candle, with aggressive buy/sell volume tracked into a delta panel and a
-synthetic order book shown in a right-side depth panel.
+Proves incremental candle updates, order flow, Level 2 depth, and a liquidity
+heatmap: a forming candle updated from synthetic ticks, its wick expanding, then
+closing and rolling into a new candle, with aggressive buy/sell volume tracked into
+a delta panel, a synthetic order book shown in a right-side depth panel, and the
+book's liquidity accumulated over time into a background heatmap layer.
 
 ```bash
 cargo run -p examples-live --release -- --snapshot artifacts/live
@@ -146,11 +147,13 @@ chart. Three frames are captured at fixed tick offsets around a candle boundary
 | `frame.mid.plain.txt` | Same candle half formed — wick has expanded. |
 | `frame.after.plain.txt` | The candle has closed; a new one just opened. |
 | `frame.mid.html` | The mid frame as a self-contained HTML page (shared `backend_terminal::html`). |
-| `metrics.json` | Replay stats + order flow + depth: `history_candles`, `interval_secs`, `ticks_per_candle`, `total_ticks`, `frames`, `avg_update_us`, `render_us`, chart dims, `buy_volume`, `sell_volume`, `current_delta`, `cumulative_delta`, `best_bid`, `best_ask`, `spread`, `bid_depth_levels`, `ask_depth_levels`. |
+| `metrics.json` | Replay stats + order flow + depth + heatmap: `history_candles`, `interval_secs`, `ticks_per_candle`, `total_ticks`, `frames`, `avg_update_us`, `render_us`, chart dims, `buy_volume`, `sell_volume`, `current_delta`, `cumulative_delta`, `best_bid`, `best_ask`, `spread`, `bid_depth_levels`, `ask_depth_levels`, `heatmap_time_buckets`, `heatmap_price_buckets`, `visible_heatmap_cells`, `max_liquidity`. |
 
-The frames render with the **delta panel** (price + volume + order-flow delta) and
-a right-side **depth panel** (top bid/ask ladder + spread); the status line carries
-the current candle's `Δ`/`CVD` and the book's `bid`/`ask`/`spr`.
+The frames render with the **delta panel** (price + volume + order-flow delta), a
+right-side **depth panel** (top bid/ask ladder + spread), and a **liquidity heatmap**
+background layer (coarse `· ░ ▒ ▓ █` intensity under the candles); the status line
+carries the current candle's `Δ`/`CVD`, the book's `bid`/`ask`/`spr`, and the
+heatmap's `liq`/`cells`.
 
 ### Acceptance criteria
 
@@ -176,6 +179,12 @@ the current candle's `Δ`/`CVD` and the book's `bid`/`ask`/`spr`.
       ```bash
       grep -E '"best_bid"|"best_ask"|"spread"|"bid_depth_levels"|"ask_depth_levels"' artifacts/live/metrics.json
       # best_bid < best_ask; spread == best_ask - best_bid
+      ```
+- [ ] **Liquidity accumulates into a heatmap.** The frames draw a coarse
+      `· ░ ▒ ▓ █` background layer under the candles, the status line shows
+      `liq`/`cells`, and `metrics.json` reports the heatmap fields:
+      ```bash
+      grep -E '"heatmap_time_buckets"|"heatmap_price_buckets"|"visible_heatmap_cells"|"max_liquidity"' artifacts/live/metrics.json
       ```
 - [ ] **Deterministic for the same seed** — frame text is byte-identical across runs:
       ```bash
@@ -219,6 +228,11 @@ Runs the full workspace suite, including:
   synthetic depth that stays non-crossing with positive sizes; the depth panel
   keeps fixed dimensions; the replay book stays non-crossing and the live
   `metrics.json` carries the depth fields.
+- **Heatmap** (`market-core` + `backend-terminal` + `examples-live`): rolling-window
+  liquidity store (record, eviction at capacity, price-bucket mapping,
+  `cells_in_price_range`, determinism); the heatmap renders as a fixed-dimension
+  background layer with candles drawn on top; the replay records liquidity and the
+  live `metrics.json` carries the heatmap fields.
 
 ## Suggested loop after a renderer change
 

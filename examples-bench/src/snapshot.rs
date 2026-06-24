@@ -56,6 +56,7 @@ fn snapshot_opts(style: Style, color: ColorMode) -> ChartOptions {
         show_volume: true,
         show_delta: false,
         depth: None,
+        heatmap: None,
         title: "finchart · SYNTH".to_string(),
     }
 }

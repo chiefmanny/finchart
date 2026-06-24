@@ -129,6 +129,11 @@ impl OrderBook {
         }
     }
 
+    /// All levels of `side`, best-first (bids descending, asks ascending).
+    pub fn levels(&self, side: BookSide) -> Vec<DepthLevel> {
+        self.top_n(side, usize::MAX)
+    }
+
     /// The `n` best levels of `side`, best-first (bids descending, asks ascending).
     pub fn top_n(&self, side: BookSide, n: usize) -> Vec<DepthLevel> {
         let to_level = |(&tick, &size): (&i64, &f64)| DepthLevel {
@@ -266,5 +271,21 @@ mod tests {
         });
         assert!(approx(b.best_bid(), 98.0));
         assert_eq!(b.level_counts(), (1, 0));
+    }
+
+    #[test]
+    fn levels_returns_all_levels_best_first() {
+        let b = book();
+        let bids = b.levels(BookSide::Bid);
+        let asks = b.levels(BookSide::Ask);
+        assert_eq!(bids.len(), 3);
+        assert_eq!(asks.len(), 3);
+        // Best-first: bids descending, asks ascending — matches `top_n` with a
+        // large n.
+        assert_eq!(bids, b.top_n(BookSide::Bid, 99));
+        assert_eq!(asks, b.top_n(BookSide::Ask, 99));
+        // Total resting size is preserved across the side.
+        let bid_size: f64 = bids.iter().map(|l| l.size).sum();
+        assert!((bid_size - 10.0).abs() < 1e-9);
     }
 }
