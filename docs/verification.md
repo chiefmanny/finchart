@@ -180,12 +180,15 @@ heatmap's `liq`/`cells`.
       grep -E '"best_bid"|"best_ask"|"spread"|"bid_depth_levels"|"ask_depth_levels"' artifacts/live/metrics.json
       # best_bid < best_ask; spread == best_ask - best_bid
       ```
-- [ ] **Liquidity accumulates into a heatmap.** The frames draw a coarse
-      `· ░ ▒ ▓ █` background layer under the candles, the status line shows
-      `liq`/`cells`, and `metrics.json` reports the heatmap fields:
+- [ ] **Liquidity accumulates into a heatmap.** The frames draw a coarse, side-aware
+      `· ░ ▒ ▓` background layer under the candles (bid green / ask red, no full
+      blocks), the status line shows `liq`/`cells`, and `metrics.json` reports the
+      heatmap fields:
       ```bash
       grep -E '"heatmap_time_buckets"|"heatmap_price_buckets"|"visible_heatmap_cells"|"max_liquidity"' artifacts/live/metrics.json
       ```
+      (The heatmap is **off by default in the interactive viewer**; it is on in this
+      snapshot and in scenarios.)
 - [ ] **Deterministic for the same seed** — frame text is byte-identical across runs:
       ```bash
       cp artifacts/live/frame.mid.plain.txt /tmp/prev.txt
@@ -193,6 +196,40 @@ heatmap's `liq`/`cells`.
       diff /tmp/prev.txt artifacts/live/frame.mid.plain.txt && echo "deterministic"
       ```
       (`metrics.json` timings vary per run; the frame text does not.)
+
+## Scenario verification
+
+Makes the heatmap interpretable by rendering deterministic market-structure
+fixtures with the side-aware heatmap + executed-trade markers.
+
+```bash
+cargo run -p examples-live --release -- --scenario <name> --snapshot artifacts/scenario
+# names: ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload
+```
+
+Each scenario emits `frame.before/mid/after.plain.txt`, `frame.mid.html`, and a
+`metrics.json` with `scenario`, `steps`, heatmap stats, and `trade_markers`. The
+runner zooms the price view to the book so structure is legible. Fixtures and
+config are in `examples-live/src/scenarios.rs` and `market-core`'s `scenario`
+module.
+
+### Acceptance criteria
+
+- [ ] **Frames fit fixed dimensions** — each `frame.*.plain.txt` is 30 lines × 120
+      chars, no ANSI escapes.
+- [ ] **Walls are visible.** A wall scenario renders a bright `▓` band at the wall
+      price (it dominates the faint `·` ladder); `metrics.json` `max_liquidity`
+      equals the wall size:
+      ```bash
+      cargo run -q -p examples-live --release -- --scenario ask-wall --snapshot artifacts/scenario
+      grep -E '"scenario"|"max_liquidity"' artifacts/scenario/metrics.json   # ask-wall, 200
+      grep -o '▓' artifacts/scenario/frame.mid.plain.txt | wc -l             # wall band cells
+      ```
+- [ ] **Wall pull changes the frame.** For `ask-wall-pulled`, the `before` (wall
+      present) and `after` (wall gone) frames differ.
+- [ ] **Sweep shows trade markers.** `sweep` renders climbing `▲` buy markers
+      through the consumed ask liquidity; `metrics.json` `trade_markers` > 0.
+- [ ] **Deterministic for the same seed** — frame text is byte-identical across runs.
 
 ## Test command
 
@@ -230,9 +267,15 @@ Runs the full workspace suite, including:
   `metrics.json` carries the depth fields.
 - **Heatmap** (`market-core` + `backend-terminal` + `examples-live`): rolling-window
   liquidity store (record, eviction at capacity, price-bucket mapping,
-  `cells_in_price_range`, determinism); the heatmap renders as a fixed-dimension
-  background layer with candles drawn on top; the replay records liquidity and the
-  live `metrics.json` carries the heatmap fields.
+  `cells_in_price_range`, side-aware export, determinism); the heatmap renders as a
+  fixed-dimension side-coloured background layer with no full blocks, candles drawn
+  on top; the replay records liquidity and the live `metrics.json` carries the
+  heatmap fields.
+- **Scenarios & markers** (`market-core` + `backend-terminal` + `examples-live`):
+  deterministic scenario step generation (walls at expected prices, wall pulls,
+  sweep buy trades, bid reload); trade markers render at the expected price/recency;
+  the heatmap is off in the default interactive view; scenario frames are
+  deterministic with the required `metrics.json` fields.
 
 ## Suggested loop after a renderer change
 

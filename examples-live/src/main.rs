@@ -8,6 +8,7 @@
 //! time only paces the visual frame rate. No async.
 
 mod replay;
+mod scenarios;
 mod snapshot;
 
 use std::io::{self, Write};
@@ -30,12 +31,32 @@ const DEFAULT_FPS: u64 = 12;
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-
-    if let Some(pos) = args.iter().position(|a| a == "--snapshot") {
-        let dir = args
-            .get(pos + 1)
+    let snapshot_dir = args.iter().position(|a| a == "--snapshot").map(|pos| {
+        args.get(pos + 1)
             .map(String::as_str)
-            .unwrap_or("artifacts/live");
+            .unwrap_or("artifacts/live")
+    });
+
+    // `--scenario <name> [--snapshot <dir>]`: deterministic scenario snapshot.
+    if let Some(pos) = args.iter().position(|a| a == "--scenario") {
+        let name = args.get(pos + 1).map(String::as_str).unwrap_or("");
+        let Some(kind) = scenarios::parse_scenario(name) else {
+            eprintln!(
+                "unknown scenario '{name}'. options: ask-wall, bid-wall, \
+                 ask-wall-pulled, bid-wall-pulled, sweep, bid-reload"
+            );
+            std::process::exit(1);
+        };
+        let dir = snapshot_dir.unwrap_or("artifacts/scenario");
+        let paths = scenarios::write_scenario(kind, std::path::Path::new(dir))?;
+        println!("wrote {} scenario artifacts:", paths.len());
+        for p in paths {
+            println!("  {}", p.display());
+        }
+        return Ok(());
+    }
+
+    if let Some(dir) = snapshot_dir {
         let paths = snapshot::write_all(std::path::Path::new(dir))?;
         println!("wrote {} live snapshot artifacts:", paths.len());
         for p in paths {

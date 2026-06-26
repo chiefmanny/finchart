@@ -54,6 +54,7 @@ fn demo_chart(width: usize, height: usize, color: ColorMode) -> String {
             show_delta: false,
             depth: None,
             heatmap: None,
+            trades: None,
             title: "finchart · SYNTH".to_string(),
         },
     )
@@ -115,6 +116,7 @@ fn bench_one(size: usize, gen_reps: usize, hot_reps: usize) -> BenchResult {
         show_delta: false,
         depth: None,
         heatmap: None,
+        trades: None,
         title: String::new(),
     };
     let mut render_total = Duration::ZERO;

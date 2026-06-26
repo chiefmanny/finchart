@@ -41,6 +41,8 @@ pub struct ReplayConfig {
     pub depth_panel_levels: usize,
     /// Heatmap rolling-window capacity (time buckets).
     pub heatmap_time_buckets: usize,
+    /// Draw the heatmap layer (off in the normal interactive viewer).
+    pub show_heatmap: bool,
 }
 
 impl Default for ReplayConfig {
@@ -62,6 +64,7 @@ impl Default for ReplayConfig {
             depth_every: 5,
             depth_panel_levels: 6,
             heatmap_time_buckets: 160,
+            show_heatmap: false,
         }
     }
 }
@@ -78,6 +81,7 @@ pub struct Replay {
     depth_every: usize,
     depth_panel_levels: usize,
     heatmap: LiquidityHeatmap,
+    show_heatmap: bool,
 }
 
 impl Replay {
@@ -139,6 +143,7 @@ impl Replay {
             depth_every: cfg.depth_every.max(1),
             depth_panel_levels: cfg.depth_panel_levels,
             heatmap,
+            show_heatmap: cfg.show_heatmap,
         }
     }
 
@@ -180,7 +185,8 @@ impl Replay {
                 show_volume: true,
                 show_delta: true,
                 depth: Some(self.depth_panel()),
-                heatmap: Some(self.heatmap_view()),
+                heatmap: self.show_heatmap.then(|| self.heatmap_view()),
+                trades: None,
                 title: title.to_string(),
             },
         )
@@ -229,11 +235,21 @@ impl Replay {
         self.heatmap.cells_in_price_range(lo, hi)
     }
 
-    /// A render-ready heatmap view over the visible price band.
+    /// A render-ready side-aware heatmap view over the visible price band.
     pub fn heatmap_view(&self) -> HeatmapView {
         let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
+        let columns = self
+            .heatmap
+            .columns_in_range_sided(lo, hi)
+            .into_iter()
+            .map(|col| {
+                col.into_iter()
+                    .map(|(p, l, side)| (p, l, side == BookSide::Bid))
+                    .collect()
+            })
+            .collect();
         HeatmapView {
-            columns: self.heatmap.columns_in_range(lo, hi),
+            columns,
             max_liquidity: self.max_liquidity(),
         }
     }
@@ -435,5 +451,31 @@ mod tests {
         let hv = r.heatmap_view();
         assert!(!hv.columns.is_empty(), "no heatmap columns");
         assert!(hv.max_liquidity > 0.0);
+    }
+
+    #[test]
+    fn interactive_view_disables_heatmap_by_default() {
+        // ReplayConfig::default() has show_heatmap = false (the normal viewer).
+        let mut r = Replay::new(&ReplayConfig::default());
+        r.advance(500);
+        let out = r.render(120, 30, ColorMode::Plain, &r.status());
+        assert!(
+            !out.chars().any(|c| matches!(c, '░' | '▒' | '▓')),
+            "heatmap rendered when disabled"
+        );
+        assert_eq!(out.lines().count(), 30);
+    }
+
+    #[test]
+    fn heatmap_renders_when_enabled() {
+        let mut c = cfg();
+        c.show_heatmap = true;
+        let mut r = Replay::new(&c);
+        r.advance(500);
+        let out = r.render(120, 30, ColorMode::Plain, &r.status());
+        assert!(
+            out.chars().any(|ch| matches!(ch, '░' | '▒' | '▓')),
+            "heatmap not rendered when enabled"
+        );
     }
 }

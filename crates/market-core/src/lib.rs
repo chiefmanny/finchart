@@ -9,10 +9,12 @@ mod depth;
 mod heatmap;
 mod live;
 mod rng;
+mod scenario;
 mod synth;
 
 pub use candle::{Candle, CandleSeries};
 pub use depth::{BestBidAsk, BookSide, DepthLevel, DepthSnapshot, DepthUpdate, OrderBook};
 pub use heatmap::LiquidityHeatmap;
 pub use live::{CandleBuilder, CandleUpdate, Flow, Side, Tick};
+pub use scenario::{scenario, ScenarioConfig, ScenarioKind, ScenarioStep};
 pub use synth::{generate, ticks, DepthConfig, DepthGen, GenConfig, LiveConfig, TickStream};

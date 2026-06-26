@@ -125,13 +125,29 @@ pub struct DepthPanel {
     pub spread: Option<f64>,
 }
 
-/// A render-ready liquidity heatmap: `columns` oldest→newest, each a list of
-/// `(price, liquidity)` levels, plus the max-liquidity scale. Decoupled (plain
+/// A render-ready, side-aware liquidity heatmap: `columns` oldest→newest, each a
+/// list of `(price, liquidity, is_bid)` cells. `max_liquidity` is kept for
+/// reference; the renderer computes its own per-row scale. Decoupled (plain
 /// tuples) from the heatmap store.
 #[derive(Debug, Clone, Default)]
 pub struct HeatmapView {
-    pub columns: Vec<Vec<(f64, f64)>>,
+    pub columns: Vec<Vec<(f64, f64, bool)>>,
     pub max_liquidity: f64,
+}
+
+/// One executed-trade marker: `col_from_right` is how many columns back from the
+/// newest (0 = latest); `buy` selects the glyph/color.
+#[derive(Debug, Clone, Copy)]
+pub struct TradeMarker {
+    pub price: f64,
+    pub col_from_right: usize,
+    pub buy: bool,
+}
+
+/// A render-ready set of executed-trade markers overlaid on the price plot.
+#[derive(Debug, Clone, Default)]
+pub struct TradeMarkers {
+    pub markers: Vec<TradeMarker>,
 }
 
 /// Options for [`render_chart`].
@@ -149,6 +165,8 @@ pub struct ChartOptions {
     pub depth: Option<DepthPanel>,
     /// Optional liquidity heatmap drawn as a background layer in the price plot.
     pub heatmap: Option<HeatmapView>,
+    /// Optional executed-trade markers overlaid above the heatmap, below candles.
+    pub trades: Option<TradeMarkers>,
     /// Status-line prefix label (e.g. `finchart · SYNTH`); may be empty.
     pub title: String,
 }
@@ -164,6 +182,7 @@ impl Default for ChartOptions {
             show_delta: false,
             depth: None,
             heatmap: None,
+            trades: None,
             title: String::new(),
         }
     }
@@ -239,6 +258,12 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     if let Some(heatmap) = &opts.heatmap {
         draw_heatmap(
             &mut grid, heatmap, gutter, plot_cols, plot_top, plot_rows, &ps,
+        );
+    }
+    // Trade markers: above the heatmap, below the candles (bars overwrite on overlap).
+    if let Some(trades) = &opts.trades {
+        draw_trade_markers(
+            &mut grid, trades, gutter, plot_cols, plot_top, plot_rows, &ps,
         );
     }
 
@@ -447,8 +472,9 @@ fn draw_delta_panel(
     put_label(grid, gutter, baseline, "0");
 }
 
-/// Coarse liquidity intensity ramp (low → high).
-const HEAT_RAMP: [char; 5] = ['·', '░', '▒', '▓', '█'];
+/// Coarse liquidity intensity ramp (low → high). Capped at `▓` (no full block) so
+/// the background never overpowers the candles.
+const HEAT_RAMP: [char; 4] = ['·', '░', '▒', '▓'];
 
 /// The glyph for a liquidity fraction in `[0, 1]`, or `None` for empty.
 fn heat_glyph(frac: f64) -> Option<char> {
@@ -459,9 +485,11 @@ fn heat_glyph(frac: f64) -> Option<char> {
     Some(HEAT_RAMP[idx - 1])
 }
 
-/// Draw the liquidity heatmap as a background layer across the plot. Columns map
-/// newest→rightmost (follow-latest); each level's liquidity accumulates into its
-/// price row via `ps`, then a coarse intensity glyph is written.
+/// Draw the side-aware liquidity heatmap as a background layer. Columns map
+/// newest→rightmost (follow-latest); each cell's liquidity accumulates into its
+/// price row per side, intensity is scaled by the **max rendered row total** (so
+/// cells span the ramp rather than saturate), and the dominant side colors it
+/// (green = bid, red = ask).
 fn draw_heatmap(
     grid: &mut Grid,
     heatmap: &HeatmapView,
@@ -471,29 +499,72 @@ fn draw_heatmap(
     plot_rows: usize,
     ps: &PriceScale,
 ) {
-    if heatmap.max_liquidity <= 0.0 || heatmap.columns.is_empty() || plot_rows == 0 {
+    if heatmap.columns.is_empty() || plot_rows == 0 {
         return;
     }
     let ncols = heatmap.columns.len() as isize;
+
+    // Pass 1: accumulate per (column, row) bid/ask liquidity and the global max total.
+    let mut cells = vec![[0.0f64; 2]; plot_cols * plot_rows]; // [bid, ask]
+    let mut max_total = 0.0_f64;
     for c in 0..plot_cols {
-        // Rightmost plot column shows the newest heatmap column.
         let hi = c as isize + ncols - plot_cols as isize;
         if hi < 0 {
             continue;
         }
-        let column = &heatmap.columns[hi as usize];
-
-        let mut row_liq = vec![0.0; plot_rows];
-        for &(price, liq) in column {
+        for &(price, liq, is_bid) in &heatmap.columns[hi as usize] {
             let r = ps.price_to_row(price);
             if r >= 0 && (r as usize) < plot_rows {
-                row_liq[r as usize] += liq;
+                let cell = &mut cells[c * plot_rows + r as usize];
+                cell[usize::from(!is_bid)] += liq;
+                max_total = max_total.max(cell[0] + cell[1]);
             }
         }
-        for (r, &liq) in row_liq.iter().enumerate() {
-            if let Some(glyph) = heat_glyph(liq / heatmap.max_liquidity) {
-                grid.set_styled(gutter + c, plot_top + r, glyph, CellColor::Default);
+    }
+    if max_total <= 0.0 {
+        return;
+    }
+
+    // Pass 2: render glyph by intensity, color by dominant side.
+    for c in 0..plot_cols {
+        for r in 0..plot_rows {
+            let [bid, ask] = cells[c * plot_rows + r];
+            if let Some(glyph) = heat_glyph((bid + ask) / max_total) {
+                let color = if bid >= ask {
+                    CellColor::Green
+                } else {
+                    CellColor::Red
+                };
+                grid.set_styled(gutter + c, plot_top + r, glyph, color);
             }
+        }
+    }
+}
+
+/// Draw executed-trade markers above the heatmap: `▲` buy (green) / `▼` sell (red),
+/// placed at the trade's price row and its column (newest = rightmost).
+fn draw_trade_markers(
+    grid: &mut Grid,
+    trades: &TradeMarkers,
+    gutter: usize,
+    plot_cols: usize,
+    plot_top: usize,
+    plot_rows: usize,
+    ps: &PriceScale,
+) {
+    for m in &trades.markers {
+        if m.col_from_right >= plot_cols {
+            continue;
+        }
+        let col = gutter + (plot_cols - 1 - m.col_from_right);
+        let r = ps.price_to_row(m.price);
+        if r >= 0 && (r as usize) < plot_rows {
+            let (glyph, color) = if m.buy {
+                ('▲', CellColor::Green)
+            } else {
+                ('▼', CellColor::Red)
+            };
+            grid.set_styled(col, plot_top + r as usize, glyph, color);
         }
     }
 }
@@ -640,6 +711,9 @@ fn compose_status(
         "{visible} candles → {bars} bars · {price_min:.2}-{price_max:.2} · {}",
         opts.style.label()
     ));
+    if opts.heatmap.is_some() {
+        s.push_str(" · heatmap bid/ask");
+    }
     s
 }
 
@@ -743,6 +817,7 @@ mod tests {
             show_delta: false,
             depth: None,
             heatmap: None,
+            trades: None,
             title: "finchart · SYNTH".to_string(),
         }
     }
@@ -1001,17 +1076,18 @@ mod tests {
         assert!(out.contains("\u{1b}[31m"), "expected red asks");
     }
 
-    /// A synthetic heatmap spanning the view's price range with a liquidity
-    /// gradient (so the full intensity ramp appears).
+    /// A synthetic side-aware heatmap spanning the view's price range: bids in the
+    /// lower half, asks in the upper half, with a liquidity gradient.
     fn heatmap_for(view: &render_core::CulledView) -> HeatmapView {
         let (lo, hi) = view.price_extent().unwrap();
         let rows = 30usize;
-        let columns: Vec<Vec<(f64, f64)>> = (0..130)
+        let split = (lo + hi) / 2.0;
+        let columns: Vec<Vec<(f64, f64, bool)>> = (0..130)
             .map(|_| {
                 (0..rows)
                     .map(|k| {
                         let price = lo + (hi - lo) * k as f64 / (rows as f64 - 1.0);
-                        (price, k as f64 + 1.0)
+                        (price, k as f64 + 1.0, price < split)
                     })
                     .collect()
             })
@@ -1019,6 +1095,72 @@ mod tests {
         HeatmapView {
             columns,
             max_liquidity: rows as f64,
+        }
+    }
+
+    #[test]
+    fn heatmap_uses_no_full_block_glyph() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        // Volume/delta are off and OHLC bars don't use blocks, so any `█` would
+        // be a heatmap cell — the ramp must not produce one.
+        assert!(
+            !render_chart(&view, &o).contains('█'),
+            "heatmap used a full block"
+        );
+    }
+
+    #[test]
+    fn heatmap_colors_bid_and_ask_sides() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        o.color = ColorMode::Ansi;
+        let out = render_chart(&view, &o);
+        assert!(out.contains("\u{1b}[32m"), "expected green bid cells");
+        assert!(out.contains("\u{1b}[31m"), "expected red ask cells");
+    }
+
+    #[test]
+    fn status_line_has_heatmap_legend() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.heatmap = Some(heatmap_for(&view));
+        let first = render_chart(&view, &o).lines().next().unwrap().to_string();
+        assert!(first.contains("heatmap"), "missing heatmap legend: {first}");
+    }
+
+    #[test]
+    fn trade_markers_render_at_price_and_recency() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let (lo, hi) = view.price_extent().unwrap();
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.trades = Some(TradeMarkers {
+            markers: vec![
+                TradeMarker {
+                    price: (lo + hi) / 2.0,
+                    col_from_right: 0,
+                    buy: true,
+                },
+                TradeMarker {
+                    price: (lo + hi) / 2.0,
+                    col_from_right: 5,
+                    buy: false,
+                },
+            ],
+        });
+        let out = render_chart(&view, &o);
+        assert!(out.contains('▲'), "expected buy marker");
+        assert!(out.contains('▼'), "expected sell marker");
+        // Dimensions unchanged with markers.
+        assert_eq!(out.lines().count(), 30);
+        for line in out.lines() {
+            assert_eq!(line.chars().count(), 120);
         }
     }
 

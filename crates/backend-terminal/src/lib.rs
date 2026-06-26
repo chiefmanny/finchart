@@ -9,4 +9,5 @@ mod timefmt;
 
 pub use render::{
     render_chart, rendered_bar_count, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style,
+    TradeMarker, TradeMarkers,
 };

@@ -108,6 +108,7 @@ impl App {
                 show_delta: false,
                 depth: None,
                 heatmap: None,
+                trades: None,
                 title: "finchart · h/l pan · k/j zoom · r reset · q quit".to_string(),
             },
         )

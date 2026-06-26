@@ -14,10 +14,11 @@ candle live), **Order-Flow V1** (aggressive buy/sell volume, per-candle delta,
 cumulative delta, and a terminal delta panel), **Depth V1** (a Level 2 order book,
 synthetic depth generation, and a right-side terminal depth panel), and
 **Heatmap V1** (a bounded depth-history store and a coarse terminal liquidity
-heatmap layer). See `docs/mvp.md`, `docs/mvp-implementation-plan.md`,
-`docs/terminal-renderer-v2-plan.md`, `docs/live-replay-plan.md`,
-`docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`, and
-`docs/heatmap-v1-plan.md`.
+heatmap layer), and **Heatmap V1.1** (side-aware rendering, deterministic
+market-structure scenarios, and executed-trade markers). See `docs/mvp.md`,
+`docs/mvp-implementation-plan.md`, `docs/terminal-renderer-v2-plan.md`,
+`docs/live-replay-plan.md`, `docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`,
+`docs/heatmap-v1-plan.md`, and `docs/heatmap-v1.1-plan.md`.
 
 The broader vision (trades, order-book depth, footprint/heatmap, Canvas/WebGPU
 backends, live feeds) is described in `README.md` / `docs/research.md` but is
@@ -31,6 +32,7 @@ cargo test                  # run all unit tests (run after every change)
 cargo run -p examples-tui --release     # interactive chart viewer (pan/zoom/reset/quit)
 cargo run -p examples-live --release            # live synthetic replay (follows the forming candle; --fps N)
 cargo run -p examples-live --release -- --snapshot artifacts/live  # deterministic before/mid/after frames
+cargo run -p examples-live --release -- --scenario sweep --snapshot artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
 cargo run -p examples-bench --release   # demo chart + 10k/100k/1M benchmark table
 cargo run -p examples-bench --release -- --snapshot artifacts/tui  # export deterministic render snapshots
 cargo clippy --workspace --all-targets  # lint (keep clean)
@@ -98,15 +100,27 @@ The example binaries depend on all three. `crossterm` is used **only** by
   `render_chart`'s `depth: Option<DepthPanel>` draws a fixed-width right-side
   ladder (top asks / spread / top bids) — total dimensions stay `width × height`.
 - **Liquidity heatmap.** `market_core::LiquidityHeatmap` is a bounded rolling
-  window (`VecDeque`) of time-bucket columns, each a `BTreeMap<i64, f64>` of
-  combined (bid+ask) liquidity per price *tick* — absolute keys, so price drift is
-  handled and price→row bucketing happens at render time. `record(&book, ts)`
+  window (`VecDeque`) of time-bucket columns, each holding **separate bid/ask**
+  `BTreeMap<i64, f64>` liquidity per price *tick* — absolute keys, so price drift
+  is handled and price→row bucketing happens at render time. `record(&book, ts)`
   snapshots the book each depth step; accessors give `time_buckets`,
-  `price_buckets`, `max_liquidity`, `cells_in_price_range`, and `columns_in_range`
-  (render export). `render_chart`'s `heatmap: Option<HeatmapView>` draws a coarse
-  `· ░ ▒ ▓ █` intensity **background layer** (newest column → rightmost) *before*
-  the bars, so candles draw on top; dimensions stay `width × height`. Not a
-  footprint chart.
+  `price_buckets`, `max_liquidity`, `cells_in_price_range`, combined
+  `columns_in_range`, and **side-aware `columns_in_range_sided`** (render export).
+  `render_chart`'s `heatmap: Option<HeatmapView>` draws a coarse `· ░ ▒ ▓`
+  intensity **background layer** (newest column → rightmost) *before* the bars, so
+  candles draw on top; dimensions stay `width × height`. It is **side-aware**
+  (cells carry `is_bid`; bid green / ask red), **normalized by the max rendered row
+  total** (cells don't saturate), the ramp is **capped at `▓`** (no full block),
+  and a `· heatmap bid/ask` legend appears in the status line.
+  `ChartOptions.trades: Option<TradeMarkers>` overlays executed trades (`▲` buy /
+  `▼` sell) above the heatmap, below candles. The heatmap is **off by default in
+  the interactive viewer** (`ReplayConfig.show_heatmap`); it is on in the live
+  snapshot and scenarios. Not a footprint chart.
+- **Scenarios.** `market_core::scenario(ScenarioConfig)` produces deterministic
+  market-structure step sequences (`ScenarioKind`: static/pulled ask/bid walls, ask
+  sweep, bid reload) — each step a book snapshot + executed trades. The
+  `examples-live --scenario <name> --snapshot <dir>` runner renders them with the
+  heatmap + trade markers so structure (walls, pulls, sweeps) is legible.
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.

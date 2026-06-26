@@ -10,11 +10,13 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::depth::{BookSide, OrderBook};
 
-/// One time bucket: combined liquidity per price tick.
+/// One time bucket: resting liquidity per price tick, kept per side so the
+/// renderer can color bids and asks distinctly. Combined liquidity is `bid + ask`.
 #[derive(Debug, Clone, PartialEq)]
 struct HeatmapColumn {
     ts: i64,
-    liquidity: BTreeMap<i64, f64>,
+    bid: BTreeMap<i64, f64>,
+    ask: BTreeMap<i64, f64>,
 }
 
 /// A rolling window of liquidity columns (oldest → newest).
@@ -46,15 +48,15 @@ impl LiquidityHeatmap {
     /// Snapshot `book`'s combined liquidity into a new time bucket, evicting the
     /// oldest column once the window exceeds `capacity`.
     pub fn record(&mut self, book: &OrderBook, ts: i64) {
-        let mut liquidity: BTreeMap<i64, f64> = BTreeMap::new();
-        for side in [BookSide::Bid, BookSide::Ask] {
-            for lvl in book.levels(side) {
-                *liquidity
-                    .entry(self.price_to_tick(lvl.price))
-                    .or_insert(0.0) += lvl.size;
-            }
+        let mut bid: BTreeMap<i64, f64> = BTreeMap::new();
+        for lvl in book.levels(BookSide::Bid) {
+            *bid.entry(self.price_to_tick(lvl.price)).or_insert(0.0) += lvl.size;
         }
-        self.columns.push_back(HeatmapColumn { ts, liquidity });
+        let mut ask: BTreeMap<i64, f64> = BTreeMap::new();
+        for lvl in book.levels(BookSide::Ask) {
+            *ask.entry(self.price_to_tick(lvl.price)).or_insert(0.0) += lvl.size;
+        }
+        self.columns.push_back(HeatmapColumn { ts, bid, ask });
         while self.columns.len() > self.capacity {
             self.columns.pop_front();
         }
@@ -69,7 +71,8 @@ impl LiquidityHeatmap {
     pub fn price_buckets(&self) -> usize {
         let mut ticks = BTreeSet::new();
         for col in &self.columns {
-            ticks.extend(col.liquidity.keys().copied());
+            ticks.extend(col.bid.keys().copied());
+            ticks.extend(col.ask.keys().copied());
         }
         ticks.len()
     }
@@ -78,7 +81,7 @@ impl LiquidityHeatmap {
     pub fn max_liquidity(&self) -> f64 {
         self.columns
             .iter()
-            .flat_map(|c| c.liquidity.values().copied())
+            .flat_map(|c| c.bid.values().chain(c.ask.values()).copied())
             .fold(0.0, f64::max)
     }
 
@@ -87,20 +90,36 @@ impl LiquidityHeatmap {
         let (lo, hi) = self.tick_range(min, max);
         self.columns
             .iter()
-            .map(|c| c.liquidity.range(lo..=hi).count())
+            .map(|c| c.bid.range(lo..=hi).count() + c.ask.range(lo..=hi).count())
             .sum()
     }
 
     /// Render export: per column (oldest → newest), the `(price, liquidity)`
-    /// levels within `[min, max]`.
+    /// levels (both sides combined) within `[min, max]`, price-sorted.
     pub fn columns_in_range(&self, min: f64, max: f64) -> Vec<Vec<(f64, f64)>> {
+        self.columns_in_range_sided(min, max)
+            .into_iter()
+            .map(|col| col.into_iter().map(|(p, l, _)| (p, l)).collect())
+            .collect()
+    }
+
+    /// Side-aware render export: per column, the `(price, liquidity, side)` levels
+    /// within `[min, max]`, price-sorted (bids and asks interleaved by price).
+    pub fn columns_in_range_sided(&self, min: f64, max: f64) -> Vec<Vec<(f64, f64, BookSide)>> {
         let (lo, hi) = self.tick_range(min, max);
         self.columns
             .iter()
             .map(|c| {
-                c.liquidity
+                let mut cells: Vec<(i64, f64, BookSide)> = c
+                    .bid
                     .range(lo..=hi)
-                    .map(|(&t, &l)| (t as f64 * self.tick_size, l))
+                    .map(|(&t, &l)| (t, l, BookSide::Bid))
+                    .chain(c.ask.range(lo..=hi).map(|(&t, &l)| (t, l, BookSide::Ask)))
+                    .collect();
+                cells.sort_by_key(|(t, _, _)| *t);
+                cells
+                    .into_iter()
+                    .map(|(t, l, s)| (t as f64 * self.tick_size, l, s))
                     .collect()
             })
             .collect()
@@ -193,5 +212,33 @@ mod tests {
             b.record(&book(), ts);
         }
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn columns_in_range_sided_tags_each_cell_with_its_side() {
+        let mut h = LiquidityHeatmap::new(0.05, 8);
+        h.record(&book(), 1);
+        let cols = h.columns_in_range_sided(99.0, 101.0);
+        assert_eq!(cols.len(), 1);
+        let cells = &cols[0];
+        assert_eq!(cells.len(), 6);
+
+        let bids: Vec<f64> = cells
+            .iter()
+            .filter(|(_, _, s)| *s == BookSide::Bid)
+            .map(|(p, _, _)| *p)
+            .collect();
+        let asks: Vec<f64> = cells
+            .iter()
+            .filter(|(_, _, s)| *s == BookSide::Ask)
+            .map(|(p, _, _)| *p)
+            .collect();
+        assert_eq!(bids.len(), 3);
+        assert_eq!(asks.len(), 3);
+
+        // Bids sit below asks (non-crossing).
+        let max_bid = bids.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_ask = asks.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(max_bid < min_ask, "{max_bid} >= {min_ask}");
     }
 }

@@ -34,6 +34,7 @@ fn snap_config() -> ReplayConfig {
         depth_every: 5,
         depth_panel_levels: 6,
         heatmap_time_buckets: 160,
+        show_heatmap: true,
     }
 }
 
