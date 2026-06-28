@@ -6,15 +6,22 @@
 
 mod candle;
 mod depth;
+mod event;
 mod heatmap;
 mod live;
 mod rng;
 mod scenario;
+mod state;
 mod synth;
 
 pub use candle::{Candle, CandleSeries};
 pub use depth::{BestBidAsk, BookSide, DepthLevel, DepthSnapshot, DepthUpdate, OrderBook};
+pub use event::{parse_event, parse_events, serialize_event, serialize_events, MarketEvent};
 pub use heatmap::LiquidityHeatmap;
 pub use live::{CandleBuilder, CandleUpdate, Flow, Side, Tick};
 pub use scenario::{scenario, ScenarioConfig, ScenarioKind, ScenarioStep};
-pub use synth::{generate, ticks, DepthConfig, DepthGen, GenConfig, LiveConfig, TickStream};
+pub use state::{replay_events, ApplyResult, ChartState};
+pub use synth::{
+    events, generate, ticks, DepthConfig, DepthDelta, DepthGen, EventConfig, EventSource,
+    GenConfig, LiveConfig, TickStream,
+};

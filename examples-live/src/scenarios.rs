@@ -14,7 +14,7 @@ use backend_terminal::{
     html, render_chart, ChartOptions, ColorMode, HeatmapView, Style, TradeMarker, TradeMarkers,
 };
 use market_core::{
-    scenario, BookSide, Candle, CandleSeries, LiquidityHeatmap, OrderBook, ScenarioConfig,
+    scenario, BookSide, Candle, CandleSeries, ChartState, MarketEvent, ScenarioConfig,
     ScenarioKind, Side,
 };
 use render_core::{cull, Viewport};
@@ -102,12 +102,11 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
     let steps = scenario(&cfg);
     let up_to = up_to.min(steps.len());
 
+    // The candle price line (sine/ramp) is decorative history; the book and
+    // heatmap are driven through ChartState via depth + heartbeat events.
     let mut candles = CandleSeries::new();
-    let mut book = OrderBook::new(cfg.tick_size);
-    let mut heatmap = LiquidityHeatmap::new(cfg.tick_size, cfg.steps);
     let mut markers = Vec::new();
     let mut prev = cfg.mid;
-
     for (t, step) in steps.iter().take(up_to).enumerate() {
         let close = close_price(&cfg, step.mid, t);
         candles.push(Candle {
@@ -120,9 +119,6 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
         });
         prev = close;
 
-        book.apply_snapshot(&step.snapshot);
-        heatmap.record(&book, step.ts);
-
         for trade in &step.trades {
             markers.push(TradeMarker {
                 price: trade.price,
@@ -132,7 +128,14 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
         }
     }
 
-    let view = cull(&candles, &Viewport::new(0, candles.len()));
+    let mut state = ChartState::from_history(candles, 1, cfg.tick_size, Some(cfg.steps), 0);
+    for step in steps.iter().take(up_to) {
+        state.apply(&MarketEvent::DepthSnapshot(step.snapshot.clone()));
+        state.apply(&MarketEvent::Heartbeat { ts: step.ts });
+    }
+    let heatmap = state.heatmap().expect("heatmap enabled");
+
+    let view = cull(state.series(), &Viewport::new(0, state.series().len()));
     let (lo, hi) = view
         .price_extent()
         .unwrap_or((cfg.mid - 1.0, cfg.mid + 1.0));

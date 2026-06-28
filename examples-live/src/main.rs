@@ -7,6 +7,7 @@
 //! Synthetic tick timestamps drive all candle logic deterministically; wall-clock
 //! time only paces the visual frame rate. No async.
 
+mod feed;
 mod replay;
 mod scenarios;
 mod snapshot;
@@ -36,6 +37,27 @@ fn main() -> io::Result<()> {
             .map(String::as_str)
             .unwrap_or("artifacts/live")
     });
+
+    // `--record <file>`: write the synthetic event stream to a text file.
+    if let Some(pos) = args.iter().position(|a| a == "--record") {
+        let file = args
+            .get(pos + 1)
+            .map(String::as_str)
+            .unwrap_or("artifacts/feed/events.txt");
+        let n = feed::record(std::path::Path::new(file))?;
+        println!("recorded {n} events to {file}");
+        return Ok(());
+    }
+
+    // `--replay <file>`: fold a recorded event file into a chart and print a frame.
+    if let Some(pos) = args.iter().position(|a| a == "--replay") {
+        let file = args
+            .get(pos + 1)
+            .map(String::as_str)
+            .unwrap_or("artifacts/feed/events.txt");
+        print!("{}", feed::replay(std::path::Path::new(file))?);
+        return Ok(());
+    }
 
     // `--scenario <name> [--snapshot <dir>]`: deterministic scenario snapshot.
     if let Some(pos) = args.iter().position(|a| a == "--scenario") {

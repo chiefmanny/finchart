@@ -2,10 +2,12 @@
 //! deterministic synthetic tick stream into candles, and render a follow-latest
 //! frame. All logic here is unit-testable without a TTY.
 
+use std::iter::Peekable;
+
 use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};
 use market_core::{
-    generate, ticks, BookSide, Candle, CandleBuilder, DepthConfig, DepthGen, Flow, GenConfig,
-    LiquidityHeatmap, LiveConfig, OrderBook, TickStream,
+    events, generate, BookSide, Candle, ChartState, DepthConfig, EventConfig, EventSource, Flow,
+    GenConfig, LiquidityHeatmap, LiveConfig, MarketEvent,
 };
 use render_core::{cull, Viewport};
 
@@ -69,24 +71,22 @@ impl Default for ReplayConfig {
     }
 }
 
-/// A running live replay: closed history + a forming candle, fed by ticks, plus a
-/// synthetic Level 2 order book.
+/// A running live replay driven through the neutral [`ChartState`] ingestion
+/// path: a synthetic [`EventSource`] produces `MarketEvent`s and `ChartState`
+/// folds them into candles + order book + heatmap. The runner no longer mutates
+/// those structures directly.
 pub struct Replay {
-    builder: CandleBuilder,
-    stream: TickStream,
+    state: ChartState,
+    events: Peekable<EventSource>,
     window: usize,
     total_ticks: usize,
-    book: OrderBook,
-    depth: DepthGen,
-    depth_every: usize,
     depth_panel_levels: usize,
-    heatmap: LiquidityHeatmap,
     show_heatmap: bool,
 }
 
 impl Replay {
-    /// Preload history and prepare the live tick stream (continuous with the
-    /// last historical candle).
+    /// Preload history and prepare the synthetic event source (continuous with the
+    /// last historical candle), then apply its seeding depth snapshot.
     pub fn new(cfg: &ReplayConfig) -> Self {
         let history = generate(&GenConfig {
             seed: cfg.seed,
@@ -104,61 +104,78 @@ impl Replay {
             .map(|c| (c.ts + cfg.interval_secs, c.close))
             .unwrap_or((HISTORY_START_TS, cfg.start_price));
 
-        let builder = CandleBuilder::from_history(history, cfg.interval_secs);
-        let stream = ticks(&LiveConfig {
-            seed: cfg.seed ^ 0x9E37_79B9_7F4A_7C15,
-            start_ts: live_ts,
-            start_price: live_price,
-            interval_secs: cfg.interval_secs,
-            ticks_per_candle: cfg.ticks_per_candle,
-            volatility: cfg.tick_volatility,
-            drift: cfg.drift,
-            volume_per_tick: cfg.volume_per_tick,
-        });
+        let event_cfg = EventConfig {
+            live: LiveConfig {
+                seed: cfg.seed ^ 0x9E37_79B9_7F4A_7C15,
+                start_ts: live_ts,
+                start_price: live_price,
+                interval_secs: cfg.interval_secs,
+                ticks_per_candle: cfg.ticks_per_candle,
+                volatility: cfg.tick_volatility,
+                drift: cfg.drift,
+                volume_per_tick: cfg.volume_per_tick,
+            },
+            depth: DepthConfig {
+                seed: cfg.seed ^ 0xD3F7_0000_D3F7_0000,
+                tick_size: cfg.tick_size,
+                levels: cfg.depth_levels,
+                base_size: cfg.depth_base_size,
+                size_jitter: 0.5,
+                recenter_band: 0.5,
+                updates_per_step: cfg.depth_levels / 2,
+            },
+            depth_every: cfg.depth_every.max(1),
+        };
 
-        // Synthetic order book, seeded with an initial ladder around the mid.
-        let mut depth = DepthGen::new(DepthConfig {
-            seed: cfg.seed ^ 0xD3F7_0000_D3F7_0000,
-            tick_size: cfg.tick_size,
-            levels: cfg.depth_levels,
-            base_size: cfg.depth_base_size,
-            size_jitter: 0.5,
-            recenter_band: 0.5,
-            updates_per_step: cfg.depth_levels / 2,
-        });
-        let mut book = OrderBook::new(cfg.tick_size);
-        book.apply_snapshot(&depth.snapshot(live_ts, live_price));
+        // The heatmap is always recorded; `show_heatmap` only gates rendering.
+        let state = ChartState::from_history(
+            history,
+            cfg.interval_secs,
+            cfg.tick_size,
+            Some(cfg.heatmap_time_buckets),
+            cfg.window.max(1),
+        );
 
-        // Liquidity heatmap, seeded with the initial book.
-        let mut heatmap = LiquidityHeatmap::new(cfg.tick_size, cfg.heatmap_time_buckets);
-        heatmap.record(&book, live_ts);
-
-        Self {
-            builder,
-            stream,
+        let mut replay = Self {
+            state,
+            events: events(&event_cfg).peekable(),
             window: cfg.window,
             total_ticks: 0,
-            book,
-            depth,
-            depth_every: cfg.depth_every.max(1),
             depth_panel_levels: cfg.depth_panel_levels,
-            heatmap,
             show_heatmap: cfg.show_heatmap,
+        };
+        // Apply the seeding events (initial depth snapshot + heartbeat) so the book
+        // and heatmap are populated before the first tick.
+        replay.drain_until_next_trade();
+        replay
+    }
+
+    /// Apply pending non-trade events (depth deltas + heartbeats) up to the next
+    /// trade, leaving the trade pending.
+    fn drain_until_next_trade(&mut self) {
+        while self
+            .events
+            .peek()
+            .is_some_and(|ev| !matches!(ev, MarketEvent::Trade(_)))
+        {
+            if let Some(ev) = self.events.next() {
+                self.state.apply(&ev);
+            }
         }
     }
 
-    /// Ingest the next `n` ticks, stepping the order book and recording the
-    /// heatmap every `depth_every`.
+    /// Ingest the next `n` trades, applying each trade plus the depth/heartbeat
+    /// events that follow it, through [`ChartState`].
     pub fn advance(&mut self, n: usize) {
         for _ in 0..n {
-            if let Some(tick) = self.stream.next() {
-                self.builder.ingest(tick);
-                self.total_ticks += 1;
-                if self.total_ticks.is_multiple_of(self.depth_every) {
-                    self.depth.step(&mut self.book, tick.ts, tick.price);
-                    self.heatmap.record(&self.book, tick.ts);
+            match self.events.next() {
+                Some(ev) => {
+                    self.state.apply(&ev);
+                    self.total_ticks += 1;
                 }
+                None => break,
             }
+            self.drain_until_next_trade();
         }
     }
 
@@ -173,7 +190,7 @@ impl Replay {
     ///
     /// [`status`]: Replay::status
     pub fn render(&self, width: usize, height: usize, color: ColorMode, title: &str) -> String {
-        let series = self.builder.series();
+        let series = self.state.series();
         let view = cull(series, &self.viewport());
         render_chart(
             &view,
@@ -193,53 +210,58 @@ impl Replay {
     }
 
     pub fn best_bid(&self) -> Option<f64> {
-        self.book.best_bid()
+        self.state.best_bid()
     }
 
     pub fn best_ask(&self) -> Option<f64> {
-        self.book.best_ask()
+        self.state.best_ask()
     }
 
     pub fn spread(&self) -> Option<f64> {
-        self.book.spread()
+        self.state.spread()
     }
 
     /// `(bid_levels, ask_levels)` resting in the book.
     pub fn depth_level_counts(&self) -> (usize, usize) {
-        self.book.level_counts()
+        self.state.depth_level_counts()
     }
 
     /// The visible price band (from the follow-latest viewport), if any.
     fn visible_price_extent(&self) -> Option<(f64, f64)> {
-        cull(self.builder.series(), &self.viewport()).price_extent()
+        cull(self.state.series(), &self.viewport()).price_extent()
+    }
+
+    /// The replay's heatmap (always enabled).
+    fn heatmap(&self) -> &LiquidityHeatmap {
+        self.state.heatmap().expect("heatmap enabled in replay")
     }
 
     /// Largest single-cell liquidity in the heatmap window.
     pub fn max_liquidity(&self) -> f64 {
-        self.heatmap.max_liquidity()
+        self.heatmap().max_liquidity()
     }
 
     /// Time buckets currently held in the heatmap window.
     pub fn heatmap_time_buckets(&self) -> usize {
-        self.heatmap.time_buckets()
+        self.heatmap().time_buckets()
     }
 
     /// Distinct price buckets across the heatmap window.
     pub fn heatmap_price_buckets(&self) -> usize {
-        self.heatmap.price_buckets()
+        self.heatmap().price_buckets()
     }
 
     /// Populated heatmap cells within the visible price band.
     pub fn visible_heatmap_cells(&self) -> usize {
         let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
-        self.heatmap.cells_in_price_range(lo, hi)
+        self.heatmap().cells_in_price_range(lo, hi)
     }
 
     /// A render-ready side-aware heatmap view over the visible price band.
     pub fn heatmap_view(&self) -> HeatmapView {
         let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
         let columns = self
-            .heatmap
+            .heatmap()
             .columns_in_range_sided(lo, hi)
             .into_iter()
             .map(|col| {
@@ -258,7 +280,8 @@ impl Replay {
     pub fn depth_panel(&self) -> DepthPanel {
         let n = self.depth_panel_levels;
         let to_tuples = |side| {
-            self.book
+            self.state
+                .book()
                 .top_n(side, n)
                 .into_iter()
                 .map(|l| (l.price, l.size))
@@ -273,12 +296,12 @@ impl Replay {
 
     /// The forming candle's order flow, or `None` before the first tick.
     pub fn current_flow(&self) -> Option<Flow> {
-        self.builder.current_flow()
+        self.state.current_flow()
     }
 
     /// Cumulative volume delta (CVD) across the whole series.
     pub fn cumulative_delta(&self) -> f64 {
-        self.builder.cumulative_delta()
+        self.state.cumulative_delta()
     }
 
     /// A deterministic status string: the forming candle's OHLC, order-flow delta,
@@ -312,11 +335,11 @@ impl Replay {
     }
 
     pub fn series_len(&self) -> usize {
-        self.builder.series().len()
+        self.state.series().len()
     }
 
     pub fn current(&self) -> Option<Candle> {
-        self.builder.current()
+        self.state.current()
     }
 
     pub fn total_ticks(&self) -> usize {

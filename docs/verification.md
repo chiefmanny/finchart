@@ -231,6 +231,36 @@ module.
       through the consumed ask liquidity; `metrics.json` `trade_markers` > 0.
 - [ ] **Deterministic for the same seed** — frame text is byte-identical across runs.
 
+## Feed adapter (record / replay)
+
+All ingestion flows through one neutral path — `MarketEvent` → `ChartState::apply`
+— so synthetic data, scenarios, and (future) file/gRPC sources share it. Events
+serialize to a tiny line-based text format for deterministic record/replay.
+
+```bash
+cargo run -p examples-live --release -- --record artifacts/feed/events.txt
+cargo run -p examples-live --release -- --replay artifacts/feed/events.txt
+```
+
+### Acceptance criteria
+
+- [ ] **Record writes a readable event stream.** Each line is one event
+      (`T`/`S`/`U`/`H`); the file starts with a seeding `S` (snapshot) + `H`
+      (heartbeat):
+      ```bash
+      cargo run -q -p examples-live --release -- --record artifacts/feed/events.txt
+      head -2 artifacts/feed/events.txt    # S … | …   then   H …
+      ```
+- [ ] **Replay reproduces the state.** Replaying a recorded file folds back into the
+      same `ChartState` and renders a fixed-dimension frame (verified in tests via
+      `ChartState: PartialEq` over record → serialize → parse → replay).
+- [ ] **Replay is deterministic** — the printed frame is byte-identical across runs:
+      ```bash
+      cargo run -q -p examples-live --release -- --replay artifacts/feed/events.txt > /tmp/a.txt
+      cargo run -q -p examples-live --release -- --replay artifacts/feed/events.txt > /tmp/b.txt
+      diff /tmp/a.txt /tmp/b.txt && echo "deterministic"
+      ```
+
 ## Test command
 
 ```bash
@@ -276,6 +306,14 @@ Runs the full workspace suite, including:
   sweep buy trades, bid reload); trade markers render at the expected price/recency;
   the heatmap is off in the default interactive view; scenario frames are
   deterministic with the required `metrics.json` fields.
+- **Feed adapter** (`market-core` + `examples-live`): `MarketEvent` text round-trips
+  (each variant, empty sides, blank lines, garbage rejected); `ChartState::apply`
+  folds trades→candles/flow, depth→book, heartbeat→heatmap with the expected
+  `ApplyResult`; the same event stream yields the same final `ChartState`;
+  recorded → serialized → parsed → replayed reproduces the state exactly; the
+  synthetic `events()` source is deterministic and seeds with snapshot+heartbeat;
+  `DepthGen::step` returns snapshot-first-then-updates; and `--record`/`--replay`
+  round-trips through a file.
 
 ## Suggested loop after a renderer change
 

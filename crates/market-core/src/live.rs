@@ -59,6 +59,7 @@ pub enum CandleUpdate {
 
 /// Folds ticks into a `CandleSeries`. The forming candle is the last element of
 /// the series, mutated in place via [`CandleSeries::update_last`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct CandleBuilder {
     series: CandleSeries,
     interval_secs: i64,

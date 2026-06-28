@@ -1,8 +1,11 @@
 //! Deterministic synthetic OHLCV generator: a seeded geometric random walk on a
 //! fixed time grid. Same `GenConfig` always produces the same `CandleSeries`.
 
+use std::collections::VecDeque;
+
 use crate::candle::{Candle, CandleSeries};
-use crate::depth::{BookSide, DepthLevel, DepthSnapshot, DepthUpdate, OrderBook};
+use crate::depth::{BookSide, DepthLevel, DepthSnapshot, DepthUpdate};
+use crate::event::MarketEvent;
 use crate::live::{Side, Tick};
 use crate::rng::SplitMix64;
 
@@ -216,20 +219,22 @@ impl DepthGen {
         DepthSnapshot { ts, bids, asks }
     }
 
-    /// Advance the book one step: re-center (full snapshot) if `mid` has drifted
-    /// past the band, otherwise apply a deterministic batch of level updates
-    /// (size jitter, occasional deletion) around the current center. Bids stay
-    /// below center and asks above, so the book never crosses.
-    pub fn step(&mut self, book: &mut OrderBook, ts: i64, mid: f64) {
+    /// Advance one step, returning the depth delta to apply: a re-centering full
+    /// snapshot if `mid` has drifted past the band, otherwise a deterministic batch
+    /// of level updates (size jitter, occasional deletion) around the current
+    /// center. Bids stay below center and asks above, so the book never crosses.
+    /// Pure: the caller (e.g. [`ChartState`]) owns the book.
+    ///
+    /// [`ChartState`]: crate::ChartState
+    pub fn step(&mut self, ts: i64, mid: f64) -> DepthDelta {
         let drift = self.center.map_or(f64::INFINITY, |c| (mid - c).abs());
         if drift > self.cfg.recenter_band {
-            let snap = self.snapshot(ts, mid);
-            book.apply_snapshot(&snap);
-            return;
+            return DepthDelta::Snapshot(self.snapshot(ts, mid));
         }
 
         let center = self.center.expect("center set when not recentering");
         let tick = self.cfg.tick_size;
+        let mut updates = Vec::with_capacity(self.cfg.updates_per_step);
         for _ in 0..self.cfg.updates_per_step {
             let side = if self.rng.next_f64() < 0.5 {
                 BookSide::Bid
@@ -249,13 +254,104 @@ impl DepthGen {
             } else {
                 self.jittered_size()
             };
-            book.apply_update(&DepthUpdate {
+            updates.push(DepthUpdate {
                 ts,
                 side,
                 price,
                 size,
             });
         }
+        DepthDelta::Updates(updates)
+    }
+}
+
+/// The depth change produced by one [`DepthGen::step`]: a full re-centering
+/// snapshot, or a batch of incremental level updates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DepthDelta {
+    Snapshot(DepthSnapshot),
+    Updates(Vec<DepthUpdate>),
+}
+
+/// Parameters for the synthetic [`events`] source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventConfig {
+    /// Tick (trade) stream config.
+    pub live: LiveConfig,
+    /// Depth generator config.
+    pub depth: DepthConfig,
+    /// Run a depth step every this many trades (≥ 1).
+    pub depth_every: usize,
+}
+
+/// A deterministic synthetic [`MarketEvent`] stream: an initial seeding
+/// `DepthSnapshot` + `Heartbeat`, then a `Trade` per tick, with a depth delta
+/// (snapshot/updates) and a `Heartbeat` every `depth_every` trades. Endless — use
+/// `.take(n)`. Folding it into a [`ChartState`] reproduces the live replay.
+///
+/// [`ChartState`]: crate::ChartState
+pub struct EventSource {
+    ticks: TickStream,
+    depth: DepthGen,
+    depth_every: usize,
+    start_ts: i64,
+    start_price: f64,
+    tick_count: usize,
+    seeded: bool,
+    pending: VecDeque<MarketEvent>,
+}
+
+/// Create an [`EventSource`] from `cfg`.
+pub fn events(cfg: &EventConfig) -> EventSource {
+    EventSource {
+        ticks: ticks(&cfg.live),
+        depth: DepthGen::new(cfg.depth.clone()),
+        depth_every: cfg.depth_every.max(1),
+        start_ts: cfg.live.start_ts,
+        start_price: cfg.live.start_price,
+        tick_count: 0,
+        seeded: false,
+        pending: VecDeque::new(),
+    }
+}
+
+impl EventSource {
+    fn refill(&mut self) {
+        if !self.seeded {
+            self.seeded = true;
+            let snap = self.depth.snapshot(self.start_ts, self.start_price);
+            self.pending.push_back(MarketEvent::DepthSnapshot(snap));
+            self.pending
+                .push_back(MarketEvent::Heartbeat { ts: self.start_ts });
+            return;
+        }
+        let Some(tick) = self.ticks.next() else {
+            return;
+        };
+        let (ts, price) = (tick.ts, tick.price);
+        self.tick_count += 1;
+        self.pending.push_back(MarketEvent::Trade(tick));
+
+        if self.tick_count.is_multiple_of(self.depth_every) {
+            match self.depth.step(ts, price) {
+                DepthDelta::Snapshot(s) => self.pending.push_back(MarketEvent::DepthSnapshot(s)),
+                DepthDelta::Updates(us) => self
+                    .pending
+                    .extend(us.into_iter().map(MarketEvent::DepthUpdate)),
+            }
+            self.pending.push_back(MarketEvent::Heartbeat { ts });
+        }
+    }
+}
+
+impl Iterator for EventSource {
+    type Item = MarketEvent;
+
+    fn next(&mut self) -> Option<MarketEvent> {
+        if self.pending.is_empty() {
+            self.refill();
+        }
+        self.pending.pop_front()
     }
 }
 
@@ -464,6 +560,8 @@ mod tests {
 
     // --- synthetic depth -----------------------------------------------------
 
+    use crate::depth::OrderBook;
+
     fn depth_cfg() -> DepthConfig {
         DepthConfig {
             seed: 5,
@@ -474,6 +572,34 @@ mod tests {
             recenter_band: 0.5,
             updates_per_step: 6,
         }
+    }
+
+    /// Apply a depth delta to a book (the consumer's job now that `step` is pure).
+    fn apply(book: &mut OrderBook, delta: DepthDelta) {
+        match delta {
+            DepthDelta::Snapshot(s) => book.apply_snapshot(&s),
+            DepthDelta::Updates(us) => {
+                for u in us {
+                    book.apply_update(&u);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn step_is_snapshot_first_then_updates() {
+        let mut g = DepthGen::new(depth_cfg());
+        assert!(matches!(g.step(0, 100.0), DepthDelta::Snapshot(_)));
+        // A small move stays within the band → incremental updates.
+        assert!(matches!(g.step(1, 100.01), DepthDelta::Updates(_)));
+    }
+
+    #[test]
+    fn step_recenter_returns_snapshot() {
+        let mut g = DepthGen::new(depth_cfg());
+        let _ = g.step(0, 100.0);
+        // A jump past the band → a fresh snapshot.
+        assert!(matches!(g.step(1, 105.0), DepthDelta::Snapshot(_)));
     }
 
     #[test]
@@ -504,7 +630,7 @@ mod tests {
         let mut mid = 100.0;
         for k in 0..200 {
             mid += if k % 2 == 0 { 0.03 } else { -0.02 };
-            g.step(&mut book, k, mid);
+            apply(&mut book, g.step(k, mid));
             if let (Some(b), Some(a)) = (book.best_bid(), book.best_ask()) {
                 assert!(b < a, "crossed at step {k}: {b} >= {a}");
             }
@@ -519,7 +645,7 @@ mod tests {
             let mut mid = 100.0;
             for k in 0..100 {
                 mid += 0.01;
-                g.step(&mut book, k, mid);
+                apply(&mut book, g.step(k, mid));
             }
             book
         };
@@ -530,8 +656,8 @@ mod tests {
     fn depth_recenters_when_mid_drifts_past_the_band() {
         let mut g = DepthGen::new(depth_cfg());
         let mut book = OrderBook::new(0.1);
-        g.step(&mut book, 0, 100.0); // initial snapshot around 100
-        g.step(&mut book, 1, 105.0); // jump > band -> recenter around 105
+        apply(&mut book, g.step(0, 100.0)); // initial snapshot around 100
+        apply(&mut book, g.step(1, 105.0)); // jump > band -> recenter around 105
         let bb = book.best_bid().unwrap();
         let ba = book.best_ask().unwrap();
         assert!(
@@ -547,12 +673,86 @@ mod tests {
         let mut mid = 100.0;
         for k in 0..150 {
             mid += 0.005;
-            g.step(&mut book, k, mid);
+            apply(&mut book, g.step(k, mid));
         }
         for side in [BookSide::Bid, BookSide::Ask] {
             for lvl in book.top_n(side, 8) {
                 assert!(lvl.size > 0.0, "non-positive resting size: {lvl:?}");
             }
         }
+    }
+
+    // --- synthetic event source ----------------------------------------------
+
+    use crate::event::MarketEvent;
+    use crate::state::ChartState;
+    use crate::CandleSeries;
+
+    fn event_cfg() -> EventConfig {
+        EventConfig {
+            live: live_cfg(),
+            depth: DepthConfig {
+                tick_size: 0.05,
+                ..depth_cfg()
+            },
+            depth_every: 5,
+        }
+    }
+
+    #[test]
+    fn events_are_deterministic() {
+        let a: Vec<_> = events(&event_cfg()).take(300).collect();
+        let b: Vec<_> = events(&event_cfg()).take(300).collect();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn events_start_with_a_seeding_snapshot_and_heartbeat() {
+        let first: Vec<_> = events(&event_cfg()).take(2).collect();
+        assert!(matches!(first[0], MarketEvent::DepthSnapshot(_)));
+        assert!(matches!(first[1], MarketEvent::Heartbeat { .. }));
+    }
+
+    #[test]
+    fn event_stream_contains_trades_and_heartbeats() {
+        let evs: Vec<_> = events(&event_cfg()).take(200).collect();
+        assert!(evs.iter().any(|e| matches!(e, MarketEvent::Trade(_))));
+        assert!(
+            evs.iter()
+                .filter(|e| matches!(e, MarketEvent::Heartbeat { .. }))
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn events_fold_into_a_populated_chartstate() {
+        let cfg = event_cfg();
+        let mut state = ChartState::from_history(
+            CandleSeries::new(),
+            cfg.live.interval_secs,
+            0.05,
+            Some(64),
+            32,
+        );
+        for ev in events(&cfg).take(400) {
+            state.apply(&ev);
+        }
+        assert!(!state.series().is_empty(), "no candles");
+        assert!(state.best_bid().is_some(), "book empty");
+        assert!(state.heatmap().unwrap().time_buckets() > 0, "heatmap empty");
+
+        // Same stream folds to the same state.
+        let mut other = ChartState::from_history(
+            CandleSeries::new(),
+            cfg.live.interval_secs,
+            0.05,
+            Some(64),
+            32,
+        );
+        for ev in events(&cfg).take(400) {
+            other.apply(&ev);
+        }
+        assert_eq!(state, other);
     }
 }

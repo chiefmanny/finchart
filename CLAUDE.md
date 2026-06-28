@@ -14,11 +14,14 @@ candle live), **Order-Flow V1** (aggressive buy/sell volume, per-candle delta,
 cumulative delta, and a terminal delta panel), **Depth V1** (a Level 2 order book,
 synthetic depth generation, and a right-side terminal depth panel), and
 **Heatmap V1** (a bounded depth-history store and a coarse terminal liquidity
-heatmap layer), and **Heatmap V1.1** (side-aware rendering, deterministic
-market-structure scenarios, and executed-trade markers). See `docs/mvp.md`,
+heatmap layer), **Heatmap V1.1** (side-aware rendering, deterministic
+market-structure scenarios, and executed-trade markers), and **Feed Adapter V1**
+(a source-agnostic `MarketEvent` ingestion boundary + `ChartState` sink, a
+synthetic event source, and deterministic event record/replay). See `docs/mvp.md`,
 `docs/mvp-implementation-plan.md`, `docs/terminal-renderer-v2-plan.md`,
 `docs/live-replay-plan.md`, `docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`,
-`docs/heatmap-v1-plan.md`, and `docs/heatmap-v1.1-plan.md`.
+`docs/heatmap-v1-plan.md`, `docs/heatmap-v1.1-plan.md`, and
+`docs/feed-adapter-v1-plan.md`.
 
 The broader vision (trades, order-book depth, footprint/heatmap, Canvas/WebGPU
 backends, live feeds) is described in `README.md` / `docs/research.md` but is
@@ -33,6 +36,8 @@ cargo run -p examples-tui --release     # interactive chart viewer (pan/zoom/res
 cargo run -p examples-live --release            # live synthetic replay (follows the forming candle; --fps N)
 cargo run -p examples-live --release -- --snapshot artifacts/live  # deterministic before/mid/after frames
 cargo run -p examples-live --release -- --scenario sweep --snapshot artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
+cargo run -p examples-live --release -- --record artifacts/feed/events.txt    # record the synthetic MarketEvent stream to a text file
+cargo run -p examples-live --release -- --replay artifacts/feed/events.txt    # replay a recorded event file through ChartState and print a frame
 cargo run -p examples-bench --release   # demo chart + 10k/100k/1M benchmark table
 cargo run -p examples-bench --release -- --snapshot artifacts/tui  # export deterministic render snapshots
 cargo clippy --workspace --all-targets  # lint (keep clean)
@@ -46,12 +51,12 @@ reproducible benchmarks (not gitignored).
 
 ```text
 crates/
-  market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook + LiquidityHeatmap, RNG
+  market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook + LiquidityHeatmap, MarketEvent + ChartState, RNG
   render-core/       # Viewport (+ pan/zoom/tail), cull -> CulledView (zero-copy), aggregate -> LOD Bars, scales
   backend-terminal/  # render_chart: laid-out OHLC/candle chart (LOD, volume, axes); html export; pure
 examples-bench/      # binary: demo chart + benchmark table + deterministic snapshot export
 examples-tui/        # binary: interactive viewer (crossterm) — pan/zoom/reset/quit
-examples-live/       # binary: live synthetic replay (crossterm) — incremental candles, follow latest, snapshot
+examples-live/       # binary: live synthetic replay (crossterm) — incremental candles, follow latest, snapshot, scenarios, record/replay
 ```
 
 Dependency direction: `backend-terminal` → `render-core` → `market-core`.
@@ -121,6 +126,28 @@ The example binaries depend on all three. `crossterm` is used **only** by
   sweep, bid reload) — each step a book snapshot + executed trades. The
   `examples-live --scenario <name> --snapshot <dir>` runner renders them with the
   heatmap + trade markers so structure (walls, pulls, sweeps) is legible.
+- **Neutral feed boundary.** All ingestion goes through one path:
+  `market_core::MarketEvent` (`Trade`/`DepthSnapshot`/`DepthUpdate`/`Heartbeat`) →
+  `ChartState::apply` → `ApplyResult`. `ChartState` owns the `CandleBuilder` +
+  `OrderBook` + optional `LiquidityHeatmap` + a bounded recent-trades ring;
+  `Trade` folds a candle, depth events update the book, and `Heartbeat` is the
+  neutral "end-of-bucket" tick that records a heatmap column (so cadence is
+  source-controlled, not wired into the book). Both runners (`examples-live`
+  `Replay` and `scenarios`) build `MarketEvent`s and apply them — they no longer
+  mutate the three structures directly. `DepthGen::step(ts, mid)` is **pure**: it
+  returns a `DepthDelta` (`Snapshot`/`Updates`) instead of mutating a book.
+  `synth::events(EventConfig)` is the deterministic `MarketEvent` source
+  (`EventSource: Iterator`): a seeding snapshot + heartbeat, then a `Trade` per
+  tick with a depth delta + heartbeat every `depth_every` trades — folding it into
+  a `ChartState` reproduces the live replay. This is the adapter seam for future
+  file/gRPC/exchange sources (see `docs/future-integrations.md`); none are
+  implemented.
+- **Event record/replay.** A hand-rolled line-based text format (no deps; f64
+  shortest round-trip) via `serialize_event(s)`/`parse_event(s)`;
+  `replay_events(&mut ChartState, &[MarketEvent])` folds a recorded slice. Replaying
+  recorded events into a fresh `ChartState` reproduces the original state exactly
+  (`ChartState: PartialEq`). The `examples-live --record <file>` / `--replay <file>`
+  modes wire this to disk.
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.
