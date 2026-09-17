@@ -111,6 +111,15 @@ impl WasmChart {
         self.render_with(cols, rows, ColorMode::Ansi)
     }
 
+    /// The same frame as `render`, converted to an HTML fragment.
+    ///
+    /// The browser assigns this into a `<pre>`, so colors arrive as `.up` / `.down`
+    /// classes and the host page's own theme drives them. Every non-escape character
+    /// is HTML-escaped by the converter.
+    pub fn render_html(&self, cols: usize, rows: usize) -> String {
+        backend_terminal::html::ansi_to_html(&self.render(cols, rows))
+    }
+
     /// Scroll the manual viewport by `delta` candles (leaves follow mode).
     pub fn pan(&mut self, delta: i32) {
         let len = self.state.series().len();
@@ -286,6 +295,35 @@ mod tests {
         c.reset();
         assert_eq!(c.series_len(), 0);
         assert_eq!(c.trade_count(), 0);
+    }
+
+    #[test]
+    fn render_html_has_no_escapes_and_spans_the_colors() {
+        let mut c = chart();
+        for i in 0..5 {
+            c.apply_line(&format!("T {} 100.{} 1 B", i * 60, i));
+        }
+        let html = c.render_html(120, 30);
+        assert!(!html.contains('\u{1b}'), "raw escape leaked into html");
+        assert!(
+            html.contains("<span class=\"up\">") || html.contains("<span class=\"down\">"),
+            "expected up/down spans in {html:.200}"
+        );
+    }
+
+    #[test]
+    fn render_html_escapes_markup_characters() {
+        // The frame is assigned with innerHTML in the browser, so `<` and `&`
+        // appearing in axis labels or the title must arrive escaped.
+        let html = chart().render_html(120, 30);
+        assert!(
+            !html.contains("<pre"),
+            "unexpected raw markup in {html:.200}"
+        );
+        for chunk in html.split("<span class=").skip(1) {
+            let body = chunk.split_once('>').map(|x| x.1).unwrap_or("");
+            assert!(!body.contains('\u{1b}'));
+        }
     }
 
     #[test]
