@@ -81,19 +81,23 @@ mod tests {
                 rank: 0,
             }],
         };
-        let fill = |price: f64, buy: bool| FillNotification {
+        let fill = |price: f64, aggressor_is_buy: bool| FillNotification {
             symbol: "AAPL".to_string(),
             price,
             size: 2,
-            buy,
+            buy: aggressor_is_buy,
             partial_fill: false,
             remaining_size: 0,
+            timestamp_ns: 0,
+            maker_order_id: 0,
+            taker_order_id: 0,
+            aggressor_is_buy,
         };
         vec![
             level2_to_snapshot(&resp, 1),
             MarketEvent::Heartbeat { ts: 1 },
-            fill_to_trade(&fill(100.0, true), 2, false),
-            fill_to_trade(&fill(100.05, false), 3, false),
+            fill_to_trade(&fill(100.0, true), 2),
+            fill_to_trade(&fill(100.05, false), 3),
             MarketEvent::Heartbeat { ts: 3 },
         ]
     }

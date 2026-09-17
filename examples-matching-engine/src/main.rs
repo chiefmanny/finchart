@@ -51,7 +51,6 @@ struct Config {
     depth: u32,
     depth_interval_ms: u64,
     heartbeat_ms: u64,
-    invert_trade_side: bool,
     window: usize,
     heatmap_capacity: usize,
     trade_cap: usize,
@@ -71,7 +70,6 @@ impl Default for Config {
             depth: 20,
             depth_interval_ms: 1000,
             heartbeat_ms: 1000,
-            invert_trade_side: false,
             window: 60,
             heatmap_capacity: 160,
             trade_cap: 64,
@@ -215,7 +213,6 @@ fn feed_config(cfg: &Config) -> FeedConfig {
         depth: cfg.depth,
         depth_interval_ms: cfg.depth_interval_ms,
         heartbeat_ms: cfg.heartbeat_ms,
-        invert_trade_side: cfg.invert_trade_side,
     }
 }
 
@@ -258,7 +255,6 @@ fn print_usage() {
            --depth-interval-ms <n>   depth poll interval (default 1000)\n  \
            --heartbeat-ms <n>        heartbeat cadence (default 1000)\n  \
            --window <n>              visible candle window (default 60)\n  \
-           --invert-trade-side       flip buy/sell aggressor mapping\n  \
            --heatmap                 draw the liquidity heatmap layer\n  \
            --record <file>           append the translated event stream to a file\n  \
            --replay <file>           replay a recorded file offline (no engine)\n  \
@@ -293,7 +289,6 @@ impl Config {
         if let Some(v) = arg_str(args, "--window").and_then(|s| s.parse().ok()) {
             cfg.window = v;
         }
-        cfg.invert_trade_side = has_flag(args, "--invert-trade-side");
         cfg.show_heatmap = has_flag(args, "--heatmap");
         cfg.record = arg_str(args, "--record");
         cfg.replay = arg_str(args, "--replay");
@@ -334,20 +329,18 @@ mod tests {
         assert_eq!(cfg.symbol, "ETHUSD");
         assert_eq!(cfg.tick_size, 0.01);
         assert!(cfg.show_heatmap);
-        assert!(!cfg.invert_trade_side);
         assert_eq!(cfg.endpoint, "http://127.0.0.1:50051"); // default
         assert_eq!(cfg.depth, 20); // default
     }
 
     #[test]
     fn replay_and_record_flags_capture_paths() {
-        let args: Vec<String> = ["bin", "--replay", "e.txt", "--invert-trade-side"]
+        let args: Vec<String> = ["bin", "--replay", "e.txt"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let cfg = Config::from_args(&args);
         assert_eq!(cfg.replay.as_deref(), Some("e.txt"));
-        assert!(cfg.invert_trade_side);
         assert_eq!(cfg.record, None);
     }
 }

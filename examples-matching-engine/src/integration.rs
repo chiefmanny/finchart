@@ -10,14 +10,18 @@ fn state() -> ChartState {
     ChartState::from_history(CandleSeries::new(), 60, 0.05, Some(32), 16)
 }
 
-fn fill(price: f64, size: i32, buy: bool) -> FillNotification {
+fn fill(price: f64, size: i32, aggressor_is_buy: bool) -> FillNotification {
     FillNotification {
         symbol: "AAPL".to_string(),
         price,
         size,
-        buy,
+        buy: aggressor_is_buy,
         partial_fill: false,
         remaining_size: 0,
+        timestamp_ns: 0,
+        maker_order_id: 0,
+        taker_order_id: 0,
+        aggressor_is_buy,
     }
 }
 
@@ -39,7 +43,7 @@ fn book() -> Level2Response {
 #[test]
 fn translated_buy_fill_builds_a_candle_and_buy_flow() {
     let mut s = state();
-    s.apply(&fill_to_trade(&fill(100.0, 4, true), 60, false));
+    s.apply(&fill_to_trade(&fill(100.0, 4, true), 60));
     assert_eq!(s.series().len(), 1, "fill did not open a candle");
     let f = s.current_flow().unwrap();
     assert_eq!(f.buy_volume, 4.0);
@@ -53,7 +57,7 @@ fn translated_buy_fill_builds_a_candle_and_buy_flow() {
 #[test]
 fn translated_sell_fill_records_sell_flow() {
     let mut s = state();
-    s.apply(&fill_to_trade(&fill(100.0, 3, false), 60, false));
+    s.apply(&fill_to_trade(&fill(100.0, 3, false), 60));
     let f = s.current_flow().unwrap();
     assert_eq!(f.sell_volume, 3.0);
     assert_eq!(f.buy_volume, 0.0);
@@ -84,7 +88,7 @@ fn heartbeat_after_depth_records_a_heatmap_column() {
 fn translation_yields_events_without_a_chartstate_or_render() {
     // Pure translation needs neither a book nor a renderer.
     assert!(matches!(
-        fill_to_trade(&fill(100.0, 1, true), 1, false),
+        fill_to_trade(&fill(100.0, 1, true), 1),
         MarketEvent::Trade(_)
     ));
     let empty = Level2Response {

@@ -7,14 +7,13 @@ use market_core::{DepthLevel, DepthSnapshot, MarketEvent, Side, Tick};
 
 use crate::pb::{FillNotification, Level2Response};
 
-/// Map the aggressor flag to a trade side.
+/// Map the engine's aggressor flag to a trade side.
 ///
-/// Documented assumption: `buy == true` means the trade was **buyer-initiated**
-/// (the aggressor lifted the ask). This must be reconciled against the real
-/// service — some feeds encode `buy` as "the bid side was consumed", which is the
-/// opposite. `invert` (from `--invert-trade-side`) flips it in one place.
-pub fn fill_side(buy: bool, invert: bool) -> Side {
-    if buy ^ invert {
+/// The service's `buy` field (tag 4) is documented as "true when the BID order
+/// was fully consumed", which is NOT the aggressor side. Tag 10,
+/// `aggressor_is_buy`, is authoritative: true when the buyer lifted the ask.
+pub fn fill_side(aggressor_is_buy: bool) -> Side {
+    if aggressor_is_buy {
         Side::Buy
     } else {
         Side::Sell
@@ -25,12 +24,12 @@ pub fn fill_side(buy: bool, invert: bool) -> Side {
 ///
 /// `partial_fill` / `remaining_size` are informational and ignored for candle
 /// aggregation in V1 — each fill is one executed trade of `size` at `price`.
-pub fn fill_to_trade(fill: &FillNotification, ts: i64, invert: bool) -> MarketEvent {
+pub fn fill_to_trade(fill: &FillNotification, ts: i64) -> MarketEvent {
     MarketEvent::Trade(Tick {
         ts,
         price: fill.price,
         size: fill.size as f64,
-        side: Some(fill_side(fill.buy, invert)),
+        side: Some(fill_side(fill.aggressor_is_buy)),
     })
 }
 
@@ -59,33 +58,42 @@ mod tests {
     use crate::pb::{FillNotification, Level2Response, PriceLevelData};
     use market_core::{MarketEvent, Side};
 
-    fn fill(buy: bool) -> FillNotification {
+    fn fill(aggressor_is_buy: bool) -> FillNotification {
         FillNotification {
             symbol: "AAPL".to_string(),
             price: 100.25,
             size: 3,
-            buy,
+            buy: aggressor_is_buy,
             partial_fill: true,
             remaining_size: 5,
+            timestamp_ns: 0,
+            maker_order_id: 0,
+            taker_order_id: 0,
+            aggressor_is_buy,
         }
     }
 
     #[test]
-    fn fill_side_default_is_buyer_initiated() {
-        // Documented default: buy=true means buyer-initiated (aggressor buys).
-        assert_eq!(fill_side(true, false), Side::Buy);
-        assert_eq!(fill_side(false, false), Side::Sell);
+    fn fill_side_reads_the_aggressor_flag() {
+        assert_eq!(fill_side(true), Side::Buy);
+        assert_eq!(fill_side(false), Side::Sell);
     }
 
     #[test]
-    fn fill_side_invert_flips_the_mapping() {
-        assert_eq!(fill_side(true, true), Side::Sell);
-        assert_eq!(fill_side(false, true), Side::Buy);
+    fn fill_side_ignores_the_legacy_buy_field() {
+        // Field 4 (`buy`) means "the BID order was fully consumed", which is not
+        // the aggressor side. A buyer-initiated fill can carry either value.
+        let mut f = fill(true);
+        f.buy = false;
+        match fill_to_trade(&f, 0) {
+            MarketEvent::Trade(t) => assert_eq!(t.side, Some(Side::Buy)),
+            other => panic!("expected Trade, got {other:?}"),
+        }
     }
 
     #[test]
     fn fill_to_trade_maps_all_fields() {
-        let ev = fill_to_trade(&fill(true), 42, false);
+        let ev = fill_to_trade(&fill(true), 42);
         match ev {
             MarketEvent::Trade(t) => {
                 assert_eq!(t.ts, 42);
@@ -93,15 +101,6 @@ mod tests {
                 assert_eq!(t.size, 3.0);
                 assert_eq!(t.side, Some(Side::Buy));
             }
-            other => panic!("expected Trade, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn fill_to_trade_respects_invert() {
-        let ev = fill_to_trade(&fill(true), 1, true);
-        match ev {
-            MarketEvent::Trade(t) => assert_eq!(t.side, Some(Side::Sell)),
             other => panic!("expected Trade, got {other:?}"),
         }
     }

@@ -28,7 +28,6 @@ pub struct FeedConfig {
     pub depth: u32,
     pub depth_interval_ms: u64,
     pub heartbeat_ms: u64,
-    pub invert_trade_side: bool,
 }
 
 /// Adapter receive time as epoch seconds. The documented proto has no source
@@ -79,12 +78,7 @@ pub fn connect(cfg: FeedConfig) -> Result<FeedHandle, Box<dyn std::error::Error>
     let client = runtime.block_on(MatchingEngineClient::connect(cfg.endpoint.clone()))?;
     let (tx, rx) = mpsc::channel();
 
-    runtime.spawn(trade_task(
-        client.clone(),
-        cfg.symbol.clone(),
-        cfg.invert_trade_side,
-        tx.clone(),
-    ));
+    runtime.spawn(trade_task(client.clone(), cfg.symbol.clone(), tx.clone()));
     runtime.spawn(depth_task(
         client.clone(),
         cfg.symbol.clone(),
@@ -104,7 +98,6 @@ pub fn connect(cfg: FeedConfig) -> Result<FeedHandle, Box<dyn std::error::Error>
 async fn trade_task(
     mut client: MatchingEngineClient<Channel>,
     symbol: String,
-    invert: bool,
     tx: Sender<MarketEvent>,
 ) {
     let Ok(resp) = client.subscribe(Symbol { symbol }).await else {
@@ -112,7 +105,7 @@ async fn trade_task(
     };
     let mut stream = resp.into_inner();
     while let Ok(Some(fill)) = stream.message().await {
-        if tx.send(fill_to_trade(&fill, now_ts(), invert)).is_err() {
+        if tx.send(fill_to_trade(&fill, now_ts())).is_err() {
             break; // consumer gone
         }
     }
