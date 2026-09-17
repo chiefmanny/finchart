@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+// Vendored verbatim from the real matching engine
+// (/Users/manan/Code/order-matching-engine/matching_engine.proto). Keep this a
+// faithful copy of the service's proto so the wire format matches exactly; the
+// adapter only *calls* Subscribe + GetLevel2, but the message field numbers and
+// scalar types must line up byte-for-byte. See
+// docs/matching-engine-adapter-v1-plan.md.
+package matchingengine;
+
+service MatchingEngine {
+
+    rpc AddLimitOrder(Order) returns (OrderID) {}
+
+    rpc CancelLimitOrder(OrderID) returns (OrderID) {}
+
+    rpc CheckSymbol(Symbol) returns (SymbolData) {}
+
+    rpc WatchSymbol(Symbol) returns (stream SymbolData) {}
+
+    rpc Subscribe(Symbol) returns (stream FillNotification) {}
+
+    rpc GetLevel2(Level2Request) returns (stream Level2Response) {}
+
+}
+
+message Order {
+    string symbol = 1;
+    double price = 2;
+    int32 size = 3;
+    bool buy = 4;
+    bool limit = 5;
+}
+
+message OrderID {
+    string symbol = 1;
+    optional int32 id = 2;
+}
+
+message FillNotification {
+    string symbol = 1;
+    double price = 2;
+    int32 size = 3;
+    // Aggressor flag. The real service documents `buy == true` as "bid side
+    // aggressor" (buyer-initiated, lifting the ask), which matches the adapter's
+    // default in `translate::fill_side`; `--invert-trade-side` flips it if needed.
+    bool buy = 4;
+    bool partial_fill = 5;
+    int32 remaining_size = 6;
+}
+
+message RejectedAddOrder {
+    string reason = 1;
+}
+
+message RejectedCancelOrder {
+    string reason = 1;
+}
+
+message Symbol {
+    string symbol = 1;
+}
+
+message SymbolData {
+    double lastAsk = 1;
+    int32 lastAskSize = 2;
+    double lastBid = 3;
+    int32 lastBidSize = 4;
+}
+
+message PriceLevelData {
+    double price = 1;
+    int32 size = 2;
+    int32 rank = 3;
+}
+
+message Level2Request {
+    string symbol = 1;
+
+    enum Side {
+        BID = 0;
+        ASK = 1;
+        BOTH = 2;
+    }
+
+    Side side = 2;       // Request either bid, ask, or both sides of the order book
+    int32 depth = 3;     // Specify the depth of the snapshot (e.g., top 10 levels)
+}
+
+message Level2Response {
+    repeated PriceLevelData bids = 1;   // A list of price levels for bids
+    repeated PriceLevelData asks = 2;   // A list of price levels for asks
+}

@@ -1,0 +1,21 @@
+[package]
+name = "examples-matching-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+market-core.workspace = true
+render-core.workspace = true
+backend-terminal.workspace = true
+# gRPC/async transport + TUI — confined to this adapter binary. The core crates
+# (market-core, render-core, backend-terminal) stay zero-dependency.
+crossterm = "0.28"
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"

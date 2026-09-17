@@ -261,6 +261,67 @@ cargo run -p examples-live --release -- --replay artifacts/feed/events.txt
       diff /tmp/a.txt /tmp/b.txt && echo "deterministic"
       ```
 
+## Matching engine adapter (offline)
+
+`examples-matching-engine` is the isolated gRPC adapter. Its live mode needs a
+running matching engine, but everything else — translation, record/replay, render —
+runs offline and reuses the neutral event format, so an `examples-live` recording
+replays straight through the adapter.
+
+```bash
+cargo run -p examples-live --release -- --record artifacts/feed/events.txt
+cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt
+```
+
+### Acceptance criteria
+
+- [ ] **gRPC deps are confined.** The core crates pull in no gRPC/async stack:
+      ```bash
+      cargo tree -p market-core -e normal | grep -Ei 'tonic|tokio|prost' || echo "market-core clean"
+      cargo tree -p backend-terminal -e normal | grep -Ei 'tonic|tokio|prost' || echo "backend-terminal clean"
+      ```
+- [ ] **Cross-crate replay.** An `examples-live` recording folds through the
+      adapter into a fixed-dimension frame with a `source=replay` status line:
+      ```bash
+      cargo run -q -p examples-matching-engine -- --replay artifacts/feed/events.txt | head -1   # source=replay · …
+      ```
+- [ ] **Unreachable endpoint fails gracefully** (exit 1 + hint), never hangs:
+      ```bash
+      cargo run -q -p examples-matching-engine -- --endpoint http://127.0.0.1:1   # "could not connect …"
+      ```
+- [ ] **Replay is deterministic** — the printed frame is byte-identical across runs.
+
+## Web showcase (WASM terminal)
+
+`finchart-web` compiles the pure pipeline to WebAssembly; `web/` is the static
+browser demo. The logic is host-testable without a browser or wasm toolchain; the
+compiled artifact is validated with a wasm build + a Node smoke render.
+
+```bash
+cargo test -p finchart-web                         # host unit tests (rlib)
+./web/build.sh                                      # wasm-pack build → web/pkg
+python3 -m http.server --directory web              # open http://localhost:8000
+```
+
+### Acceptance criteria
+
+- [ ] **Host logic is correct** (`cargo test -p finchart-web`): render is exactly
+      `rows`×`cols`, plain has no ANSI / Ansi carries escapes, trades build+count
+      candles, `zoom` shrinks the visible window, `reset` clears state.
+- [ ] **`wasm-bindgen` is confined.** The cores pull in no wasm stack:
+      ```bash
+      cargo tree -p market-core -e normal | grep -i 'wasm' || echo "market-core clean"
+      cargo tree -p render-core -e normal | grep -i 'wasm' || echo "render-core clean"
+      cargo tree -p backend-terminal -e normal | grep -i 'wasm' || echo "backend-terminal clean"
+      ```
+- [ ] **WASM builds and renders.** `./web/build.sh` produces `web/pkg/*.wasm`; a
+      `--target nodejs` smoke build folds `web/scenarios/baseline.txt` and renders a
+      30-row ANSI frame (14 candles / 400 trades) — the compiled module, not the rlib.
+- [ ] **Static assets serve.** `index.html`, `main.js`, `pkg/*.wasm`
+      (`application/wasm`), and `scenarios/*.txt` all return 200 over a static server.
+- [ ] **Recorded, no backend.** The demo replays `scenarios/*.txt` entirely
+      in-browser; determinism means each visit renders identically.
+
 ## Test command
 
 ```bash
@@ -306,6 +367,13 @@ Runs the full workspace suite, including:
   sweep buy trades, bid reload); trade markers render at the expected price/recency;
   the heatmap is off in the default interactive view; scenario frames are
   deterministic with the required `metrics.json` fields.
+- **Matching engine adapter** (`examples-matching-engine`, offline): pure
+  translation `FillNotification → Trade` (fields + buyer-initiated side default +
+  `--invert-trade-side`) and `Level2Response → DepthSnapshot` (best-first, rank
+  validates order, empty book); translated events fold through `ChartState` (fill →
+  candle/flow/CVD, level2 → BBO, heartbeat → heatmap column) with no rendering; the
+  channel-drain seam; record → replay reproduces the `ChartState`; and CLI arg
+  parsing. The live gRPC path needs a server (integration/manual).
 - **Feed adapter** (`market-core` + `examples-live`): `MarketEvent` text round-trips
   (each variant, empty sides, blank lines, garbage rejected); `ChartState::apply`
   folds trades→candles/flow, depth→book, heartbeat→heatmap with the expected

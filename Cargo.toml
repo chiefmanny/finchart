@@ -7,6 +7,8 @@ members = [
     "examples-bench",
     "examples-tui",
     "examples-live",
+    "examples-matching-engine",
+    "finchart-web",
 ]
 
 [workspace.package]

@@ -15,13 +15,19 @@ cumulative delta, and a terminal delta panel), **Depth V1** (a Level 2 order boo
 synthetic depth generation, and a right-side terminal depth panel), and
 **Heatmap V1** (a bounded depth-history store and a coarse terminal liquidity
 heatmap layer), **Heatmap V1.1** (side-aware rendering, deterministic
-market-structure scenarios, and executed-trade markers), and **Feed Adapter V1**
+market-structure scenarios, and executed-trade markers), **Feed Adapter V1**
 (a source-agnostic `MarketEvent` ingestion boundary + `ChartState` sink, a
-synthetic event source, and deterministic event record/replay). See `docs/mvp.md`,
-`docs/mvp-implementation-plan.md`, `docs/terminal-renderer-v2-plan.md`,
-`docs/live-replay-plan.md`, `docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`,
-`docs/heatmap-v1-plan.md`, `docs/heatmap-v1.1-plan.md`, and
-`docs/feed-adapter-v1-plan.md`.
+synthetic event source, and deterministic event record/replay), **Matching
+Engine Adapter V1** (an isolated `examples-matching-engine` gRPC adapter that
+translates the external matching engine's streams into `MarketEvent`s), and
+**Web Showcase V1** (the engine compiled to WebAssembly via the `finchart-web`
+crate, replaying recorded scenarios in a browser xterm.js terminal — the `web/`
+static front-end). See
+`docs/mvp.md`, `docs/mvp-implementation-plan.md`,
+`docs/terminal-renderer-v2-plan.md`, `docs/live-replay-plan.md`,
+`docs/order-flow-v1-plan.md`, `docs/depth-v1-plan.md`, `docs/heatmap-v1-plan.md`,
+`docs/heatmap-v1.1-plan.md`, `docs/feed-adapter-v1-plan.md`,
+`docs/matching-engine-adapter-v1-plan.md`, and `docs/web-showcase-v1-plan.md`.
 
 The broader vision (trades, order-book depth, footprint/heatmap, Canvas/WebGPU
 backends, live feeds) is described in `README.md` / `docs/research.md` but is
@@ -38,6 +44,11 @@ cargo run -p examples-live --release -- --snapshot artifacts/live  # determinist
 cargo run -p examples-live --release -- --scenario sweep --snapshot artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
 cargo run -p examples-live --release -- --record artifacts/feed/events.txt    # record the synthetic MarketEvent stream to a text file
 cargo run -p examples-live --release -- --replay artifacts/feed/events.txt    # replay a recorded event file through ChartState and print a frame
+cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt   # offline: replay an event file through the gRPC adapter (no engine)
+cargo run -p examples-matching-engine -- --endpoint http://host:50051 --symbol BTCUSD  # live: connect to the matching engine (needs a running server)
+cargo test -p finchart-web              # host unit tests for the WASM chart binding (no wasm needed)
+./web/build.sh                          # build the WASM bundle -> web/pkg (needs wasm-pack + wasm32 target)
+python3 -m http.server --directory web  # serve the browser demo at http://localhost:8000
 cargo run -p examples-bench --release   # demo chart + 10k/100k/1M benchmark table
 cargo run -p examples-bench --release -- --snapshot artifacts/tui  # export deterministic render snapshots
 cargo clippy --workspace --all-targets  # lint (keep clean)
@@ -57,11 +68,19 @@ crates/
 examples-bench/      # binary: demo chart + benchmark table + deterministic snapshot export
 examples-tui/        # binary: interactive viewer (crossterm) — pan/zoom/reset/quit
 examples-live/       # binary: live synthetic replay (crossterm) — incremental candles, follow latest, snapshot, scenarios, record/replay
+examples-matching-engine/  # binary: gRPC matching-engine adapter — translate streams -> MarketEvent -> ChartState (tonic/tokio confined here)
+finchart-web/        # lib (cdylib+rlib): wasm-bindgen wrapper — WasmChart folds MarketEvent lines -> ChartState -> render_chart (ANSI); wasm-bindgen confined here
+web/                 # static browser demo: index.html + main.js (xterm.js) + build.sh + scenarios/*.txt; pkg/ is generated (gitignored)
 ```
 
 Dependency direction: `backend-terminal` → `render-core` → `market-core`.
-The example binaries depend on all three. `crossterm` is used **only** by
-`examples-tui` and `examples-live`; the core crates stay zero-dependency.
+The example binaries depend on all three. `crossterm` is used **only** by the
+interactive binaries. The core crates stay **zero-dependency**: `crossterm` is
+confined to `examples-tui`/`examples-live`/`examples-matching-engine`, all
+gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
+`examples-matching-engine`, and `wasm-bindgen` lives **only** in `finchart-web`
+(all verified via `cargo tree`). The adapter's vendored proto is compiled by
+`build.rs` (`tonic-build` + a bundled `protoc`).
 
 ## Architecture notes / conventions
 
@@ -148,6 +167,37 @@ The example binaries depend on all three. `crossterm` is used **only** by
   recorded events into a fresh `ChartState` reproduces the original state exactly
   (`ChartState: PartialEq`). The `examples-live --record <file>` / `--replay <file>`
   modes wire this to disk.
+- **Matching-engine adapter (isolated).** `examples-matching-engine` is the first
+  real feed adapter: pure `translate` fns map gRPC `FillNotification →
+  MarketEvent::Trade` and `Level2Response → DepthSnapshot`, async tokio producers
+  (`Subscribe` stream, `GetLevel2` poll, `Heartbeat` ticker) push onto an `mpsc`
+  channel, and a sync render loop drains it into a `ChartState` + `render_chart`.
+  All gRPC/async deps are confined to this crate; the cores stay zero-dep. It reuses
+  the neutral event format, so `--replay <file>` runs offline and files interchange
+  with `examples-live`. The vendored `proto/matching_engine.proto` is a **faithful
+  copy of the real service** (`package matchingengine`; `FillNotification` has
+  `symbol` + integer `size`; `Level2Request` is `side=2, depth=3`, nested `Side` enum
+  `BOTH=2`; levels are `PriceLevelData`) — wire-compatible. Aggressor semantics are
+  **reconciled**: the proto documents `buy=true` as bid-side aggressor (buyer-
+  initiated), matching `fill_side`'s default; `--invert-trade-side` stays for other
+  feeds. One remaining assumption: events use adapter **receive time** (the proto has
+  no source timestamp), so live candle bucketing is arrival-timed and
+  non-deterministic (replay is deterministic). The engine's `cpp-server:50051` is
+  Docker-internal by default — expose it (`ports: ["50051:50051"]`) to connect. Not a
+  new core boundary — just a `MarketEvent` source.
+- **Web showcase (WASM, isolated).** `finchart-web` compiles the same pure pipeline
+  to WebAssembly: `WasmChart` (`#[wasm_bindgen]`) folds serialized `MarketEvent`
+  lines (`parse_event`) through a `ChartState` and calls `render_chart` to return an
+  ANSI `String`; `pan`/`zoom`/`follow` drive a `Viewport` (tail when following). The
+  render assembly (depth + side-aware heatmap + volume/delta + status line) is
+  duplicated locally so the crate depends only on the three cores + `wasm-bindgen`
+  (never on `examples-matching-engine`); trade markers are off in V1. The `web/`
+  static front-end loads the `wasm-pack --target web` bundle + xterm.js (which
+  interprets the ANSI natively), fetches a recorded `web/scenarios/*.txt`, and runs a
+  batched player loop with pan/zoom/follow. **Recorded replay only — no backend, no
+  live feed, no Canvas/WebGPU** (the terminal backend shown in a browser emulator).
+  Cores stay pure and WASM-safe; nothing existing changed. The logic is host-testable
+  via the crate's `rlib` (`cargo test -p finchart-web`).
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.
@@ -214,7 +264,14 @@ See `docs/verification.md` for the full workflow and acceptance criteria.
 ## Out of scope for the MVP
 
 Do not add without an explicit new milestone: WebGPU, browser Canvas, exchange/
-broker APIs, gRPC/protobuf, async/networking, indicators, plugin systems,
-order-book heatmaps, footprint charts. The existing C++ matching engine
-(`docs/future-integrations.md`) is a *future adapter*, not a dependency — the
-core stays data-source agnostic.
+broker APIs, indicators, plugin systems, footprint charts. gRPC/protobuf and
+async/networking are permitted **only inside `examples-matching-engine`** (the
+matching-engine adapter, `docs/matching-engine-adapter-v1-plan.md`), and
+`wasm-bindgen` **only inside `finchart-web`** (the web showcase,
+`docs/web-showcase-v1-plan.md`) — never in
+`market-core`/`render-core`/`backend-terminal`, which stay data-source agnostic and
+zero-dependency. The web showcase reuses the existing terminal renderer via WASM
+(xterm.js displays its ANSI); it is **not** a Canvas/WebGPU backend, and V1 is
+recorded-replay only (no live WebSocket bridge). The external C++ matching engine
+remains an *adapter target*, not a core dependency; the adapter maps its streams to
+neutral `MarketEvent`s.

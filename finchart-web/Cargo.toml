@@ -1,0 +1,19 @@
+[package]
+name = "finchart-web"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# cdylib for the wasm target (wasm-pack); rlib so the logic is unit-testable on
+# the host with plain `cargo test`.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+market-core.workspace = true
+render-core.workspace = true
+backend-terminal.workspace = true
+# WASM bindings — confined to this crate. The core crates
+# (market-core, render-core, backend-terminal) stay zero-dependency.
+wasm-bindgen = "0.2"
