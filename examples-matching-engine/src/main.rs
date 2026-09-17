@@ -58,6 +58,10 @@ struct Config {
     show_heatmap: bool,
     record: Option<String>,
     replay: Option<String>,
+    /// Stop and flush after this many seconds instead of waiting for a quit key.
+    duration_secs: Option<u64>,
+    /// No TUI: skip raw mode, the alternate screen, and frame painting.
+    headless: bool,
 }
 
 impl Default for Config {
@@ -77,6 +81,8 @@ impl Default for Config {
             show_heatmap: false,
             record: None,
             replay: None,
+            duration_secs: None,
+            headless: false,
         }
     }
 }
@@ -136,64 +142,89 @@ fn run_live(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let (mut last_update_us, mut last_render_us) = (0.0, 0.0);
 
     let mut stdout = io::stdout();
-    enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
-    let _guard = TerminalGuard;
+    // In headless mode nothing owns the terminal, so raw mode and the alternate
+    // screen are skipped along with the guard that would restore them.
+    let _guard = if cfg.headless {
+        None
+    } else {
+        enable_raw_mode()?;
+        execute!(stdout, EnterAlternateScreen, Hide)?;
+        Some(TerminalGuard)
+    };
     let frame_dur = Duration::from_millis(80);
+    let deadline = cfg
+        .duration_secs
+        .map(|s| Instant::now() + Duration::from_secs(s));
 
-    loop {
-        // Ingest whatever the producers have queued.
-        let mut events = Vec::new();
-        handle.drain(&mut events);
-        let t = Instant::now();
-        for ev in &events {
-            match ev {
-                MarketEvent::Trade(_) => trades += 1,
-                MarketEvent::DepthSnapshot(_) => depth_refreshes += 1,
-                _ => {}
+    // The loop body is wrapped so that an error on any `?` below still reaches the
+    // flush. Recorder writes go through a BufWriter with no Drop impl, so an early
+    // return used to discard everything still buffered.
+    let outcome = (|| -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
             }
-            state.apply(ev);
-            if let Some(rec) = &mut recorder {
-                let _ = rec.write(ev);
+
+            // Ingest whatever the producers have queued.
+            let mut events = Vec::new();
+            handle.drain(&mut events);
+            let t = Instant::now();
+            for ev in &events {
+                match ev {
+                    MarketEvent::Trade(_) => trades += 1,
+                    MarketEvent::DepthSnapshot(_) => depth_refreshes += 1,
+                    _ => {}
+                }
+                state.apply(ev);
+                if let Some(rec) = &mut recorder {
+                    let _ = rec.write(ev);
+                }
             }
-        }
-        if !events.is_empty() {
-            last_update_us = t.elapsed().as_secs_f64() * 1e6 / events.len() as f64;
-        }
+            if !events.is_empty() {
+                last_update_us = t.elapsed().as_secs_f64() * 1e6 / events.len() as f64;
+            }
 
-        let (cols, rows) = terminal::size().unwrap_or((120, 30));
-        let stats = Stats {
-            symbol: cfg.symbol.clone(),
-            trades,
-            depth_refreshes,
-            update_us: last_update_us,
-            render_us: last_render_us,
-        };
-        let title = render::status_line(&state, &stats);
-        let rcfg = render_config(cfg, cols as usize, rows as usize);
+            if cfg.headless {
+                // Nothing to paint and no tty to poll; event::poll would spin hot.
+                std::thread::sleep(frame_dur);
+                continue;
+            }
 
-        let t = Instant::now();
-        let chart = render::render_state(&state, &rcfg, ColorMode::Ansi, &title);
-        last_render_us = t.elapsed().as_secs_f64() * 1e6;
+            let (cols, rows) = terminal::size().unwrap_or((120, 30));
+            let stats = Stats {
+                symbol: cfg.symbol.clone(),
+                trades,
+                depth_refreshes,
+                update_us: last_update_us,
+                render_us: last_render_us,
+            };
+            let title = render::status_line(&state, &stats);
+            let rcfg = render_config(cfg, cols as usize, rows as usize);
 
-        queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
-        write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
-        stdout.flush()?;
+            let t = Instant::now();
+            let chart = render::render_state(&state, &rcfg, ColorMode::Ansi, &title);
+            last_render_us = t.elapsed().as_secs_f64() * 1e6;
 
-        // Pace the loop and stay responsive to quit keys.
-        if event::poll(frame_dur)? {
-            if let Event::Key(key) = event::read()? {
-                if is_quit(key) {
-                    break;
+            queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+            write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
+            stdout.flush()?;
+
+            // Pace the loop and stay responsive to quit keys.
+            if event::poll(frame_dur)? {
+                if let Event::Key(key) = event::read()? {
+                    if is_quit(key) {
+                        break;
+                    }
                 }
             }
         }
-    }
+        Ok(())
+    })();
 
     if let Some(mut rec) = recorder {
-        let _ = rec.flush();
+        rec.flush()?;
     }
-    Ok(())
+    outcome
 }
 
 fn new_state(cfg: &Config) -> ChartState {
@@ -258,6 +289,8 @@ fn print_usage() {
            --heatmap                 draw the liquidity heatmap layer\n  \
            --record <file>           append the translated event stream to a file\n  \
            --replay <file>           replay a recorded file offline (no engine)\n  \
+           --duration <secs>         record for N seconds then exit (unattended)\n  \
+           --headless                no TUI: skip raw mode and frame painting\n  \
            -h, --help                show this help"
     );
 }
@@ -292,6 +325,8 @@ impl Config {
         cfg.show_heatmap = has_flag(args, "--heatmap");
         cfg.record = arg_str(args, "--record");
         cfg.replay = arg_str(args, "--replay");
+        cfg.duration_secs = arg_str(args, "--duration").and_then(|s| s.parse().ok());
+        cfg.headless = has_flag(args, "--headless");
         cfg
     }
 }
@@ -331,6 +366,25 @@ mod tests {
         assert!(cfg.show_heatmap);
         assert_eq!(cfg.endpoint, "http://127.0.0.1:50051"); // default
         assert_eq!(cfg.depth, 20); // default
+    }
+
+    #[test]
+    fn duration_and_headless_flags_parse() {
+        let args: Vec<String> = ["bin", "--duration", "45", "--headless"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cfg = Config::from_args(&args);
+        assert_eq!(cfg.duration_secs, Some(45));
+        assert!(cfg.headless);
+    }
+
+    #[test]
+    fn duration_and_headless_default_to_interactive() {
+        let args: Vec<String> = ["bin"].iter().map(|s| s.to_string()).collect();
+        let cfg = Config::from_args(&args);
+        assert_eq!(cfg.duration_secs, None);
+        assert!(!cfg.headless);
     }
 
     #[test]
