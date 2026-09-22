@@ -74,6 +74,9 @@ impl CandleBuilder {
     /// Start from preloaded history. The next candle opens one interval after the
     /// last historical candle.
     pub fn from_history(series: CandleSeries, interval_secs: i64) -> Self {
+        // A non-positive interval would make every candle boundary meaningless and,
+        // before `align_to` was computed rather than walked, hung the caller outright.
+        let interval_secs = interval_secs.max(1);
         let current_open_ts = series.last().map(|c| c.ts + interval_secs).unwrap_or(0);
         Self {
             series,
@@ -87,7 +90,7 @@ impl CandleBuilder {
     pub fn new(interval_secs: i64, start_ts: i64) -> Self {
         Self {
             series: CandleSeries::new(),
-            interval_secs,
+            interval_secs: interval_secs.max(1),
             current_open_ts: start_ts,
             forming: false,
         }
@@ -156,10 +159,16 @@ impl CandleBuilder {
 
     /// Advance `current_open_ts` to the interval containing `ts` (skips empty
     /// intervals; synthetic streams don't produce gaps, but this stays correct).
+    ///
+    /// Computed rather than walked. A chart built from no history opens at 0, so a
+    /// first tick bearing a real epoch timestamp sits ~1.8 billion intervals away --
+    /// stepping there one interval at a time cost 3.5s per chart construction.
     fn align_to(&mut self, ts: i64) {
-        while ts >= self.current_open_ts + self.interval_secs {
-            self.current_open_ts += self.interval_secs;
+        if ts < self.current_open_ts + self.interval_secs {
+            return;
         }
+        let elapsed = ts - self.current_open_ts;
+        self.current_open_ts += (elapsed / self.interval_secs) * self.interval_secs;
     }
 
     /// Push a fresh candle seeded at `open` (high = low = close = open, vol 0).
@@ -390,5 +399,45 @@ mod tests {
         b.ingest(sided(63, 99.0, 4.0, Side::Sell)); // candle delta +6
         b.ingest(sided(120, 103.0, 5.0, Side::Buy)); // rolls; new candle delta +5
         assert_eq!(b.cumulative_delta(), 11.0);
+    }
+
+    /// A chart built from no history starts at `current_open_ts = 0`, so the first
+    /// real tick is ~1.8 billion intervals away. Walking there one interval at a
+    /// time stalls every chart construction; the answer is one division.
+    #[test]
+    fn first_tick_from_empty_history_does_not_walk_the_epoch() {
+        let start = std::time::Instant::now();
+        let mut b = CandleBuilder::from_history(CandleSeries::new(), 1);
+        b.ingest(tick(1_789_683_298, 100.0, 5.0));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "aligning to a real epoch timestamp took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn alignment_floors_to_the_containing_interval() {
+        let mut b = CandleBuilder::from_history(CandleSeries::new(), 60);
+        b.ingest(tick(1_789_683_298, 100.0, 5.0));
+        // 1_789_683_298 = 60 * 29_828_054 + 58
+        assert_eq!(b.current().unwrap().ts, 1_789_683_240);
+    }
+
+    #[test]
+    fn a_tick_before_the_open_time_does_not_rewind_the_series() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        // history ends at ts 0, so the next candle opens at 60
+        b.ingest(tick(30, 101.0, 5.0));
+        assert_eq!(b.current().unwrap().ts, 60);
+    }
+
+    #[test]
+    fn a_non_positive_interval_is_clamped_rather_than_looping_forever() {
+        let start = std::time::Instant::now();
+        let mut b = CandleBuilder::from_history(CandleSeries::new(), 0);
+        b.ingest(tick(100, 100.0, 5.0));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(b.current().unwrap().ts, 100);
     }
 }
