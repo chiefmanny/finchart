@@ -30,6 +30,9 @@ pub struct WasmChart {
     viewport: Viewport,
     following: bool,
     window: usize,
+    /// Draw one-column block candles instead of three-column OHLC bars. At a
+    /// fixed width this fits about three times as many bars on screen.
+    dense_bars: bool,
     symbol: String,
     trades: usize,
     // Retained so `reset` can rebuild an identical fresh state.
@@ -65,6 +68,7 @@ impl WasmChart {
             viewport: Viewport::full(0),
             following: true,
             window: if window == 0 { DEFAULT_WINDOW } else { window },
+            dense_bars: false,
             symbol,
             trades: 0,
             interval_secs,
@@ -133,6 +137,17 @@ impl WasmChart {
         let len = self.state.series().len();
         self.viewport = self.effective_viewport(len).zoom(factor, len);
         self.following = false;
+    }
+
+    /// Choose the bar style. Dense draws one-column block candles; the default
+    /// draws three-column OHLC bars, which are clearer but fit a third as many.
+    pub fn set_dense_bars(&mut self, dense: bool) {
+        self.dense_bars = dense;
+    }
+
+    /// Whether dense one-column bars are in use.
+    pub fn dense_bars(&self) -> bool {
+        self.dense_bars
     }
 
     /// Resume tailing the newest candle.
@@ -211,7 +226,11 @@ impl WasmChart {
                 width: cols,
                 height: rows,
                 color,
-                style: Style::OhlcBars,
+                style: if self.dense_bars {
+                    Style::Candles
+                } else {
+                    Style::OhlcBars
+                },
                 show_volume: true,
                 show_delta: true,
                 depth: Some(depth),
@@ -324,6 +343,41 @@ mod tests {
             let body = chunk.split_once('>').map(|x| x.1).unwrap_or("");
             assert!(!body.contains('\u{1b}'));
         }
+    }
+
+    /// The bar count on screen is set by how many columns each bar occupies, not
+    /// by how many candles exist: OHLC bars are three columns wide, block candles
+    /// one. At a fixed width the dense style therefore fits roughly three times as
+    /// many bars, which is the difference between a chart and a sketch of one.
+    #[test]
+    fn dense_style_fits_more_bars_in_the_same_width() {
+        fn bars(out: &str) -> usize {
+            // The title line records "N candles -> M bars".
+            let head = out.lines().next().unwrap();
+            let after = head.split("\u{2192} ").nth(1).unwrap();
+            after.split(' ').next().unwrap().parse().unwrap()
+        }
+
+        let mut wide = chart();
+        let mut dense = chart();
+        for i in 0..120 {
+            let line = format!("T {} 100.{} 1 B", i * 60, i % 10);
+            wide.apply_line(&line);
+            dense.apply_line(&line);
+        }
+        dense.set_dense_bars(true);
+
+        let wide_bars = bars(&wide.render_with(120, 30, ColorMode::Plain));
+        let dense_bars = bars(&dense.render_with(120, 30, ColorMode::Plain));
+        assert!(
+            dense_bars > wide_bars * 2,
+            "dense style drew {dense_bars} bars against {wide_bars}"
+        );
+    }
+
+    #[test]
+    fn bar_style_defaults_to_the_wide_one() {
+        assert!(!chart().dense_bars());
     }
 
     #[test]
