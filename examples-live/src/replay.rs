@@ -204,6 +204,7 @@ impl Replay {
                 depth: Some(self.depth_panel()),
                 heatmap: self.show_heatmap.then(|| self.heatmap_view()),
                 trades: None,
+                annotations: Vec::new(),
                 title: title.to_string(),
             },
         )

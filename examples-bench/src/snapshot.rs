@@ -58,6 +58,7 @@ fn snapshot_opts(style: Style, color: ColorMode) -> ChartOptions {
         depth: None,
         heatmap: None,
         trades: None,
+        annotations: Vec::new(),
         title: "finchart · SYNTH".to_string(),
     }
 }

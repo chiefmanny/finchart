@@ -8,6 +8,8 @@ pub(crate) enum CellColor {
     Default,
     Green,
     Red,
+    /// Annotations: a third color so a note never reads as a buy or a sell.
+    Note,
 }
 
 /// A `cols x rows` character grid, row-major, initialised to blank cells.

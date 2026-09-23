@@ -8,6 +8,6 @@ mod render;
 mod timefmt;
 
 pub use render::{
-    render_chart, rendered_bar_count, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style,
-    TradeMarker, TradeMarkers,
+    render_chart, rendered_bar_count, Annotation, ChartOptions, ColorMode, DepthPanel, HeatmapView,
+    Style, TradeMarker, TradeMarkers,
 };

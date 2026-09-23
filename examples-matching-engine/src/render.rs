@@ -82,6 +82,7 @@ pub fn render_state(
             depth: Some(depth),
             heatmap,
             trades: None,
+            annotations: Vec::new(),
             title: title.to_string(),
         },
     )

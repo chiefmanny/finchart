@@ -172,6 +172,7 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
                 max_liquidity: heatmap.max_liquidity(),
             }),
             trades: Some(TradeMarkers { markers }),
+            annotations: Vec::new(),
             title: format!("scenario: {}", scenario_name(kind)),
         },
     );

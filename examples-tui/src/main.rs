@@ -109,6 +109,7 @@ impl App {
                 depth: None,
                 heatmap: None,
                 trades: None,
+                annotations: Vec::new(),
                 title: "finchart · h/l pan · k/j zoom · r reset · q quit".to_string(),
             },
         )

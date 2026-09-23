@@ -1,8 +1,8 @@
 //! Convert ANSI-colored terminal output (as produced by `render_chart` in
 //! `ColorMode::Ansi`) into self-contained HTML for inspection in a browser.
 //!
-//! The renderer only emits green (32), red (31), and reset (0) codes, so the
-//! converter handles just those.
+//! The renderer only emits green (32), red (31), yellow (33, annotations) and
+//! reset (0) codes, so the converter handles just those.
 
 /// Convert ANSI-colored text into an HTML fragment: green/red escapes become
 /// `<span class="up|down">` elements; everything else is HTML-escaped.
@@ -28,6 +28,7 @@ pub fn ansi_to_html(ansi: &str) -> String {
         match code.as_str() {
             "32" => out.push_str("<span class=\"up\">"),
             "31" => out.push_str("<span class=\"down\">"),
+            "33" => out.push_str("<span class=\"note\">"),
             "0" => out.push_str("</span>"),
             _ => {}
         }
@@ -75,6 +76,14 @@ fn push_escaped(out: &mut String, c: char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yellow_becomes_note_span() {
+        assert_eq!(
+            ansi_to_html("\u{1b}[33mSWEEP\u{1b}[0m"),
+            "<span class=\"note\">SWEEP</span>"
+        );
+    }
 
     #[test]
     fn green_becomes_up_span() {

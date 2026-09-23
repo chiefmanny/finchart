@@ -29,6 +29,7 @@ pub enum ColorMode {
 const ANSI_GREEN: &str = "\u{1b}[32m";
 const ANSI_RED: &str = "\u{1b}[31m";
 const ANSI_RESET: &str = "\u{1b}[0m";
+const ANSI_NOTE: &str = "\u{1b}[33m";
 
 /// Decimal places used for price-axis labels.
 const PRICE_DECIMALS: usize = 2;
@@ -68,6 +69,7 @@ fn ansi_code(color: CellColor) -> &'static str {
     match color {
         CellColor::Green => ANSI_GREEN,
         CellColor::Red => ANSI_RED,
+        CellColor::Note => ANSI_NOTE,
         CellColor::Default => "",
     }
 }
@@ -150,6 +152,17 @@ pub struct TradeMarkers {
     pub markers: Vec<TradeMarker>,
 }
 
+/// A labelled moment in time, drawn into the price plot as a vertical rule at the
+/// bar containing `ts` with `label` beside it. An annotation outside the visible
+/// candles is skipped: before them it has scrolled away, after them it has not
+/// happened yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Annotation {
+    /// Epoch seconds, on the same clock as the candles.
+    pub ts: i64,
+    pub label: String,
+}
+
 /// Options for [`render_chart`].
 #[derive(Debug, Clone)]
 pub struct ChartOptions {
@@ -167,6 +180,8 @@ pub struct ChartOptions {
     pub heatmap: Option<HeatmapView>,
     /// Optional executed-trade markers overlaid above the heatmap, below candles.
     pub trades: Option<TradeMarkers>,
+    /// Labelled moments drawn into the price plot; empty draws nothing.
+    pub annotations: Vec<Annotation>,
     /// Status-line prefix label (e.g. `finchart · SYNTH`); may be empty.
     pub title: String,
 }
@@ -183,6 +198,7 @@ impl Default for ChartOptions {
             depth: None,
             heatmap: None,
             trades: None,
+            annotations: Vec::new(),
             title: String::new(),
         }
     }
@@ -267,6 +283,15 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
         );
     }
 
+    // Annotation rules go under the bars, so a bar keeps its own cells and the rule
+    // shows above and below it; the labels go on top once the bars are drawn.
+    let marks = annotation_columns(view, &bars, &opts.annotations, gutter, cell);
+    for &(col, _) in &marks {
+        for r in plot_top..plot_top + plot_rows {
+            grid.set_styled(col, r, '┊', CellColor::Note);
+        }
+    }
+
     // Plot: one bar per aggregated bucket, left-aligned at a fixed cell stride.
     for (i, bar) in bars.iter().enumerate() {
         let base = gutter + i * cell;
@@ -275,6 +300,8 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
             Style::Candles => draw_candle_bar(&mut grid, bar, base, plot_top, &ps),
         }
     }
+
+    draw_annotation_labels(&mut grid, &marks, gutter, chart_width, plot_top, plot_rows);
 
     // Price gutter labels: max at top, min at bottom, mid in the middle.
     put_label(&mut grid, gutter, plot_top, &lbl_max);
@@ -664,6 +691,63 @@ fn put_label(grid: &mut Grid, gutter: usize, row: usize, lbl: &str) {
     put_text(grid, start, row, lbl);
 }
 
+/// Resolve each visible annotation to the plot column of the bar containing it:
+/// the middle of that bar's cell, which for OHLC bars is its high-low line.
+fn annotation_columns<'a>(
+    view: &CulledView,
+    bars: &[Bar],
+    annotations: &'a [Annotation],
+    gutter: usize,
+    cell: usize,
+) -> Vec<(usize, &'a str)> {
+    let (Some(first), Some(&last_ts)) = (bars.first(), view.ts.last()) else {
+        return Vec::new();
+    };
+    annotations
+        .iter()
+        .filter(|a| a.ts >= first.start_ts && a.ts <= last_ts)
+        .map(|a| {
+            let i = bars.partition_point(|b| b.start_ts <= a.ts) - 1;
+            (gutter + i * cell + cell / 2, a.label.as_str())
+        })
+        .collect()
+}
+
+/// Place each label beside its rule, flipping to the left side near the right
+/// edge, and dropping to a lower row when it would collide with an earlier label.
+fn draw_annotation_labels(
+    grid: &mut Grid,
+    marks: &[(usize, &str)],
+    gutter: usize,
+    chart_width: usize,
+    plot_top: usize,
+    plot_rows: usize,
+) {
+    let rows = plot_rows.min(3);
+    let mut taken: Vec<(usize, usize, usize)> = Vec::new(); // (row, start, end)
+    for &(col, label) in marks {
+        let len = label.chars().count();
+        let start = if col + 1 + len <= chart_width {
+            col + 1
+        } else {
+            col.saturating_sub(len).max(gutter)
+        };
+        let end = (start + len).min(chart_width);
+        let row = (0..rows)
+            .map(|k| plot_top + k)
+            .find(|&r| {
+                !taken
+                    .iter()
+                    .any(|&(tr, s, e)| tr == r && start < e && s < end)
+            })
+            .unwrap_or(plot_top + rows.saturating_sub(1));
+        taken.push((row, start, end));
+        for (i, ch) in label.chars().take(end - start).enumerate() {
+            grid.set_styled(start + i, row, ch, CellColor::Note);
+        }
+    }
+}
+
 /// Write `text` (terminal-default color) into `grid` starting at `(col, row)`.
 fn put_text(grid: &mut Grid, col: usize, row: usize, text: &str) {
     for (i, ch) in text.chars().enumerate() {
@@ -818,8 +902,76 @@ mod tests {
             depth: None,
             heatmap: None,
             trades: None,
+            annotations: Vec::new(),
             title: "finchart · SYNTH".to_string(),
         }
+    }
+
+    // --- annotations -----------------------------------------------------------
+
+    /// Epoch seconds of candle `i` in `gen`'s series.
+    fn ts_of(i: i64) -> i64 {
+        1_600_000_000 + i * 60
+    }
+
+    fn annotated(annotations: Vec<Annotation>, color: ColorMode) -> String {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.color = color;
+        o.annotations = annotations;
+        render_chart(&view, &o)
+    }
+
+    fn note(i: i64, label: &str) -> Annotation {
+        Annotation {
+            ts: ts_of(i),
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn annotation_inside_the_view_draws_its_label_and_a_rule() {
+        let out = annotated(vec![note(450, "SWEEP")], ColorMode::Plain);
+        assert!(out.contains("SWEEP"), "label missing:\n{out}");
+        assert!(out.contains('┊'), "rule missing:\n{out}");
+    }
+
+    #[test]
+    fn annotation_outside_the_view_is_not_drawn() {
+        // The view holds candles 380..500. Before it is scrolled away; after it has
+        // not happened yet, so there is nothing to mark.
+        let out = annotated(
+            vec![note(100, "EARLIER"), note(650, "LATER")],
+            ColorMode::Plain,
+        );
+        assert!(!out.contains("EARLIER"));
+        assert!(!out.contains("LATER"));
+        assert!(!out.contains('┊'));
+    }
+
+    #[test]
+    fn annotation_near_the_right_edge_stays_inside_the_frame() {
+        let out = annotated(vec![note(499, "A LONG LABEL")], ColorMode::Plain);
+        assert!(out.contains("A LONG LABEL"));
+        for line in out.lines() {
+            assert_eq!(line.chars().count(), 120);
+        }
+    }
+
+    #[test]
+    fn annotations_are_colored_as_notes() {
+        let out = annotated(vec![note(450, "SWEEP")], ColorMode::Ansi);
+        assert!(out.contains("\u{1b}[33m"), "expected the note color");
+    }
+
+    #[test]
+    fn no_annotations_leaves_the_frame_unchanged() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::new(380, 500));
+        let plain = render_chart(&view, &opts(120, 30, Style::OhlcBars));
+        assert_eq!(plain, annotated(Vec::new(), ColorMode::Plain));
+        assert!(!plain.contains('┊'));
     }
 
     #[test]

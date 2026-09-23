@@ -55,6 +55,7 @@ fn demo_chart(width: usize, height: usize, color: ColorMode) -> String {
             depth: None,
             heatmap: None,
             trades: None,
+            annotations: Vec::new(),
             title: "finchart · SYNTH".to_string(),
         },
     )
@@ -117,6 +118,7 @@ fn bench_one(size: usize, gen_reps: usize, hot_reps: usize) -> BenchResult {
         depth: None,
         heatmap: None,
         trades: None,
+        annotations: Vec::new(),
         title: String::new(),
     };
     let mut render_total = Duration::ZERO;

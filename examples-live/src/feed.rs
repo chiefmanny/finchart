@@ -128,6 +128,7 @@ fn render_state(state: &ChartState, title: &str) -> String {
             depth: Some(depth),
             heatmap,
             trades: None,
+            annotations: Vec::new(),
             title: title.to_string(),
         },
     )

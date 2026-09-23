@@ -11,7 +11,9 @@
 
 use wasm_bindgen::prelude::*;
 
-use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};
+use backend_terminal::{
+    render_chart, Annotation, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style,
+};
 use market_core::{parse_event, BookSide, CandleSeries, ChartState, MarketEvent};
 use render_core::{cull, Viewport};
 
@@ -33,6 +35,9 @@ pub struct WasmChart {
     /// Draw one-column block candles instead of three-column OHLC bars. At a
     /// fixed width this fits about three times as many bars on screen.
     dense_bars: bool,
+    /// Labelled moments drawn into the plot. Kept across `reset`, because they
+    /// describe the recording rather than the state rebuilt from it.
+    annotations: Vec<Annotation>,
     symbol: String,
     trades: usize,
     // Retained so `reset` can rebuild an identical fresh state.
@@ -69,6 +74,7 @@ impl WasmChart {
             following: true,
             window: if window == 0 { DEFAULT_WINDOW } else { window },
             dense_bars: false,
+            annotations: Vec::new(),
             symbol,
             trades: 0,
             interval_secs,
@@ -148,6 +154,17 @@ impl WasmChart {
     /// Whether dense one-column bars are in use.
     pub fn dense_bars(&self) -> bool {
         self.dense_bars
+    }
+
+    /// Mark a moment (epoch seconds, on the candles' clock) with a short label.
+    /// It is drawn once the candle containing it is on screen.
+    pub fn add_annotation(&mut self, ts: i64, label: String) {
+        self.annotations.push(Annotation { ts, label });
+    }
+
+    /// Remove every annotation.
+    pub fn clear_annotations(&mut self) {
+        self.annotations.clear();
     }
 
     /// Resume tailing the newest candle.
@@ -236,6 +253,7 @@ impl WasmChart {
                 depth: Some(depth),
                 heatmap,
                 trades: None,
+                annotations: self.annotations.clone(),
                 title: self.status_line(),
             },
         )
@@ -373,6 +391,43 @@ mod tests {
             dense_bars > wide_bars * 2,
             "dense style drew {dense_bars} bars against {wide_bars}"
         );
+    }
+
+    fn filled() -> WasmChart {
+        let mut c = chart();
+        for i in 0..20 {
+            c.apply_line(&format!("T {} 100.{} 1 B", i * 60, i % 10));
+        }
+        c
+    }
+
+    #[test]
+    fn an_added_annotation_is_drawn() {
+        let mut c = filled();
+        c.add_annotation(10 * 60, "SWEEP".to_string());
+        assert!(c.render_with(120, 30, ColorMode::Plain).contains("SWEEP"));
+        assert!(c.render_html(120, 30).contains("<span class=\"note\">"));
+    }
+
+    #[test]
+    fn clearing_annotations_removes_them() {
+        let mut c = filled();
+        c.add_annotation(10 * 60, "SWEEP".to_string());
+        c.clear_annotations();
+        assert!(!c.render_with(120, 30, ColorMode::Plain).contains("SWEEP"));
+    }
+
+    /// Seeking resets the chart and refolds events up to the target, so the
+    /// annotations belong to the recording, not to the state being rebuilt.
+    #[test]
+    fn annotations_survive_a_reset() {
+        let mut c = filled();
+        c.add_annotation(10 * 60, "SWEEP".to_string());
+        c.reset();
+        for i in 0..20 {
+            c.apply_line(&format!("T {} 100.{} 1 B", i * 60, i % 10));
+        }
+        assert!(c.render_with(120, 30, ColorMode::Plain).contains("SWEEP"));
     }
 
     #[test]
