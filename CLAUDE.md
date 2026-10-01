@@ -46,6 +46,8 @@ cargo run -p examples-live --release -- --record artifacts/feed/events.txt    # 
 cargo run -p examples-live --release -- --replay artifacts/feed/events.txt    # replay a recorded event file through ChartState and print a frame
 cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt   # offline: replay an event file through the gRPC adapter (no engine)
 cargo run -p examples-matching-engine -- --endpoint http://host:50051 --symbol BTCUSD  # live: connect to the matching engine (needs a running server)
+scripts/play-recording.sh web/scenarios/large_buy_sweep.txt -- --interval-secs 1 --tick-size 0.01 --heatmap  # animate a recorded session (one --replay per heartbeat)
+docs/media/render.sh                    # re-record the README GIFs/PNGs from docs/media/*.tape (needs vhs + ffmpeg)
 cargo test -p finchart-web              # host unit tests for the WASM chart binding (no wasm needed)
 ./web/build.sh                          # build the WASM bundle -> web/pkg (needs wasm-pack + wasm32 target)
 python3 -m http.server --directory web  # serve the browser demo at http://localhost:8000
@@ -177,12 +179,13 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   with `examples-live`. The vendored `proto/matching_engine.proto` is a **faithful
   copy of the real service** (`package matchingengine`; `FillNotification` has
   `symbol` + integer `size`; `Level2Request` is `side=2, depth=3`, nested `Side` enum
-  `BOTH=2`; levels are `PriceLevelData`) — wire-compatible. Aggressor semantics are
-  **reconciled**: the proto documents `buy=true` as bid-side aggressor (buyer-
-  initiated), matching `fill_side`'s default; `--invert-trade-side` stays for other
-  feeds. One remaining assumption: events use adapter **receive time** (the proto has
-  no source timestamp), so live candle bucketing is arrival-timed and
-  non-deterministic (replay is deterministic). The engine's `cpp-server:50051` is
+  `BOTH=2`; levels are `PriceLevelData`) — wire-compatible. Aggressor side comes
+  from `FillNotification.aggressor_is_buy` (tag 10); the legacy `buy` field (tag 4,
+  "bid order fully consumed") is ignored, and `--invert-trade-side` was removed.
+  `--headless` + `--duration <secs>` record unattended (no TUI), and the recorder
+  flushes on every exit path. One remaining assumption: events use adapter
+  **receive time** (the proto has no source timestamp), so live candle bucketing is
+  arrival-timed and non-deterministic (replay is deterministic). The engine's `cpp-server:50051` is
   Docker-internal by default — expose it (`ports: ["50051:50051"]`) to connect. Not a
   new core boundary — just a `MarketEvent` source.
 - **Web showcase (WASM, isolated).** `finchart-web` compiles the same pure pipeline
@@ -197,7 +200,10 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   batched player loop with pan/zoom/follow. **Recorded replay only — no backend, no
   live feed, no Canvas/WebGPU** (the terminal backend shown in a browser emulator).
   Cores stay pure and WASM-safe; nothing existing changed. The logic is host-testable
-  via the crate's `rlib` (`cargo test -p finchart-web`).
+  via the crate's `rlib` (`cargo test -p finchart-web`). `WasmChart` also offers
+  `render_html` (frames as `<pre>`-ready HTML via `html::ansi_to_html`, used by the
+  personal site instead of xterm.js), `set_dense_bars` (one-column `Style::Candles`
+  so wide charts show more bars), and `add_annotation`/`clear_annotations`.
 - **Autoscale is viewport-scoped.** `CulledView::price_extent()` gives the
   `(min_low, max_high)` of the *visible* candles; the price scale uses that, so
   the axis never reflects the whole dataset.
@@ -206,6 +212,9 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
 - **`render_chart` is the single rendering API** (the old `render`/`render_with`
   were removed in V2). It's pure (returns a `String`) and composes a status line,
   price gutter, OHLC/candle plot, optional volume panel, and a UTC time axis.
+  `ChartOptions.annotations` (`Annotation { ts, label }`) draws a dotted rule + label
+  at the bar containing `ts` (ANSI 33; skipped when outside the visible candles);
+  the terminal binaries pass none.
   `Style::OhlcBars` (default, `╴`/`╶` ticks) and `Style::Candles` (`█`/`▒`/`─`);
   direction is in the glyph so plain output reads without color, ANSI reinforces.
   Only data cells are colored — gutter/axis/title stay default. `rendered_bar_count`

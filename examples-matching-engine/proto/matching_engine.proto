@@ -1,8 +1,7 @@
 syntax = "proto3";
 
-// Vendored verbatim from the real matching engine
-// (/Users/manan/Code/order-matching-engine/matching_engine.proto). Keep this a
-// faithful copy of the service's proto so the wire format matches exactly; the
+// Vendored verbatim from the real matching engine's `matching_engine.proto`.
+// Keep this a faithful copy of the service's proto so the wire format matches exactly; the
 // adapter only *calls* Subscribe + GetLevel2, but the message field numbers and
 // scalar types must line up byte-for-byte. See
 // docs/matching-engine-adapter-v1-plan.md.

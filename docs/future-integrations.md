@@ -42,11 +42,10 @@ Translation (`examples-matching-engine/src/translate.rs`, pure + offline-tested)
 
 Known limitations / assumptions:
 
-- **Aggressor semantics** *(reconciled)*. The real proto documents
-  `FillNotification.buy == true` as "bid side aggressor" — buyer-initiated, lifting
-  the ask — which matches `fill_side`'s default (`buy → Side::Buy`), so no inversion
-  is needed. `--invert-trade-side` remains for other feeds; if delta/CVD ever trends
-  opposite to price on obvious sweeps, flip it.
+- **Aggressor semantics** *(resolved)*. `fill_side` reads
+  `FillNotification.aggressor_is_buy` (tag 10, "true when the buyer lifted the ask").
+  The legacy `buy` field (tag 4) means "bid order fully consumed", not the aggressor,
+  and is ignored; the earlier `--invert-trade-side` escape hatch was removed.
 - **Timestamps.** The documented `FillNotification`/`Level2Response` carry no source
   timestamp, so events are stamped with adapter *receive time*. Live candle
   bucketing therefore reflects arrival timing, not exchange time; live mode is

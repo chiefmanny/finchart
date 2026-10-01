@@ -368,8 +368,8 @@ Runs the full workspace suite, including:
   the heatmap is off in the default interactive view; scenario frames are
   deterministic with the required `metrics.json` fields.
 - **Matching engine adapter** (`examples-matching-engine`, offline): pure
-  translation `FillNotification → Trade` (fields + buyer-initiated side default +
-  `--invert-trade-side`) and `Level2Response → DepthSnapshot` (best-first, rank
+  translation `FillNotification → Trade` (fields + side from `aggressor_is_buy`,
+  legacy `buy` ignored) and `Level2Response → DepthSnapshot` (best-first, rank
   validates order, empty book); translated events fold through `ChartState` (fill →
   candle/flow/CVD, level2 → BBO, heartbeat → heatmap column) with no rendering; the
   channel-drain seam; record → replay reproduces the `ChartState`; and CLI arg

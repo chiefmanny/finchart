@@ -1,5 +1,4 @@
 target/
-# Cargo.lock commented out as recommended by Claude in order to commit binaries
 artifacts/
 node_modules/
 dist/
@@ -8,3 +7,7 @@ dist/
 
 # WASM build output (regenerate with web/build.sh)
 web/pkg/
+
+# Raw VHS captures (docs/media/render.sh optimizes and deletes them)
+docs/media/*.raw.gif
+docs/media/*.raw.png
