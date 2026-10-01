@@ -39,43 +39,39 @@ python3 -m http.server --directory .         # serve (WASM won't load from file:
 Controls: scenario switcher, play/pause, speed. Pan `← →`, zoom `+ −` / mouse
 wheel, `f` to follow the live edge.
 
-## Showing off different clients
+## Scenarios
 
-The feed carries no participant identity, so the way to make a client type legible
-is to **record a session where that client dominates**. Run the engine with (say)
-only the market-maker client active, capture it, and its signature shows up on the
-chart: a market maker holds a tight spread with thick resting liquidity (dense
-two-sided heatmap around the mid); an HFT shows fast one-sided bursts and rapid
-book churn; retail is sparse small market orders; an institution sweeps several
-levels at once (a streak of same-side trade prints and a visible dent in depth).
+| File | Source | What to watch |
+|---|---|---|
+| `baseline.txt` | `examples-live --record` (seeded synthetic feed) | a steady two-sided reference market |
+| `normal_market.txt` | matching-engine recording, 3 min | an ordinary session for comparison |
+| `large_buy_sweep.txt` | matching-engine recording, 3 min | a 10,000-share buy ~70 s in; the book refills, the price does not return |
+| `liquidity_crisis.txt` | matching-engine recording, 3 min | resting depth withdraws, then buying runs through the gap and the ask side empties |
 
-Capture one file per client mix with the helper:
+The three engine sessions were recorded from a separate C++ price-time-priority
+matching engine with simulated participants (symbol `AAPL`, 1 s candles, 0.01
+tick) through `examples-matching-engine --record`. They are ordinary
+`MarketEvent` files, so they replay identically on every visit.
+
+To add your own session, run the engine with the client mix you want and capture
+it with the helper (needs a reachable engine):
 
 ```bash
-# with the engine running the client mix you want to show:
-./web/record-client.sh market-maker AAPL          # → web/scenarios/market-maker.txt
-./web/record-client.sh hft AAPL
-./web/record-client.sh institution AAPL
+./web/record-client.sh my-session AAPL          # → web/scenarios/my-session.txt
 ```
 
-Press `q` in the chart to stop; the file flushes on quit. `main.js` already lists
-`market-maker` / `hft` / `retail` / `institution` entries — **missing files are
-skipped automatically**, so each appears in the switcher as soon as you record it.
-To add a different id, copy an entry in the `SCENARIOS` array in `main.js`.
+Press `q` in the chart to stop; the file flushes on quit. Then add an entry to the
+`SCENARIOS` array in `main.js` (entries whose file is missing are skipped). The
+recorded prices/sizes are replay-parameter agnostic; only an entry's `interval` /
+`tick` / `heatmap` / `window` affect how the browser buckets candles. The
+`examples-live --scenario` structures (walls/sweeps) are snapshot-only — their
+candle line is decorative, not trade-driven — so they are not browser scenarios.
 
-Scenario files are ordinary recorded `MarketEvent` streams — deterministic on
-replay, so each renders identically every visit. A synthetic baseline (no engine
-needed) comes from:
+A fresh synthetic baseline comes from:
 
 ```bash
 cargo run -p examples-live --release -- --record web/scenarios/baseline.txt
 ```
-
-The recorded prices/sizes are replay-parameter agnostic; only a `SCENARIOS`
-entry's `interval` / `tick` / `heatmap` / `window` affect how the browser buckets
-candles. Note the `examples-live --scenario` structures (walls/sweeps) are
-snapshot-only — their candle line is decorative, not trade-driven — so they don't
-translate to browser event replay; use engine captures instead.
 
 ## Embedding on a site
 

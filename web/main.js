@@ -9,30 +9,22 @@ import init, { WasmChart } from './pkg/finchart_web.js';
 // Each scenario is a recorded MarketEvent file plus the ChartState params it was
 // recorded with (interval/tick must match for candles to bucket correctly).
 //
-// To showcase different market participants, record one session per client mix
-// from the matching engine and add an entry here (see web/record-client.sh):
-//   { id: 'market-maker', label: 'Market maker', file: 'scenarios/market-maker.txt',
-//     desc: 'Two-sided quoting: tight spread, thick resting liquidity',
-//     interval: 5, tick: 0.01, heatmap: 160, tradeCap: 64, window: 60 },
-// Entries whose file is missing are skipped automatically, so it is safe to list
-// clients before you have captured them.
+// To add a matching-engine session, record it (see web/record-client.sh) and add
+// an entry here. Entries whose file is missing are skipped automatically.
 const SCENARIOS = [
   { id: 'baseline', label: 'Baseline (synthetic)', file: 'scenarios/baseline.txt',
     desc: 'Synthetic feed — deterministic reference market',
     interval: 60, tick: 0.05, heatmap: 160, tradeCap: 64, window: 60 },
-  // interval:1 so even short (seconds-long) captures render as a candle sequence;
-  // longer captures simply yield more candles (LOD handles density).
-  { id: 'market-maker', label: 'Market maker', file: 'scenarios/market-maker.txt',
-    desc: 'Two-sided quoting: tight spread, thick resting liquidity',
+  // Engine-matched three-minute sessions. interval:1 so a seconds-scale capture
+  // renders as a candle sequence (LOD handles density).
+  { id: 'normal-market', label: 'Normal market (engine)', file: 'scenarios/normal_market.txt',
+    desc: 'An ordinary two-sided session',
     interval: 1, tick: 0.01, heatmap: 160, tradeCap: 64, window: 60 },
-  { id: 'hft', label: 'HFT', file: 'scenarios/hft.txt',
-    desc: 'Fast one-sided bursts, rapid book churn',
+  { id: 'large-buy-sweep', label: 'Large buy sweep (engine)', file: 'scenarios/large_buy_sweep.txt',
+    desc: 'A 10,000-share buy sweeps a deep book ~70 s in',
     interval: 1, tick: 0.01, heatmap: 160, tradeCap: 64, window: 60 },
-  { id: 'retail', label: 'Retail', file: 'scenarios/retail.txt',
-    desc: 'Sparse small market orders, little resting size',
-    interval: 1, tick: 0.01, heatmap: 160, tradeCap: 64, window: 60 },
-  { id: 'institution', label: 'Institution', file: 'scenarios/institution.txt',
-    desc: 'Large blocks sweeping multiple levels',
+  { id: 'liquidity-crisis', label: 'Liquidity crisis (engine)', file: 'scenarios/liquidity_crisis.txt',
+    desc: 'Liquidity withdraws, then buying runs through the gap',
     interval: 1, tick: 0.01, heatmap: 160, tradeCap: 64, window: 60 },
 ];
 
@@ -81,7 +73,8 @@ let current = SCENARIOS[0];
 let available = SCENARIOS;   // narrowed to scenarios with a present file at boot
 
 function newChart(sc) {
-  return new WasmChart(sc.interval, sc.tick, sc.heatmap, sc.tradeCap, sc.window, sc.id.toUpperCase());
+  // interval_secs is an i64 on the Rust side, which wasm-bindgen maps to BigInt.
+  return new WasmChart(BigInt(sc.interval), sc.tick, sc.heatmap, sc.tradeCap, sc.window, sc.id.toUpperCase());
 }
 
 function paint() {
