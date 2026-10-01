@@ -118,6 +118,7 @@ fn run_interactive(fps: u64) -> io::Result<()> {
     let mut next_frame = Instant::now() + frame_dur;
     let mut last_update_us = 0.0;
     let mut last_render_us = 0.0;
+    let mut painted_size = None;
     loop {
         let (cols, rows) = terminal::size().unwrap_or((120, 30));
         // Status carries the forming candle state plus the previous frame's timings.
@@ -130,7 +131,13 @@ fn run_interactive(fps: u64) -> io::Result<()> {
         let chart = replay.render(cols as usize, rows as usize, ColorMode::Ansi, &title);
         last_render_us = t.elapsed().as_secs_f64() * 1e6;
 
-        queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+        // Frames fill the whole screen, so repaint in place; a full clear (which
+        // can flash a blank frame mid-write) is only needed when the size changes.
+        if painted_size != Some((cols, rows)) {
+            queue!(stdout, Clear(ClearType::All))?;
+            painted_size = Some((cols, rows));
+        }
+        queue!(stdout, MoveTo(0, 0))?;
         write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
         stdout.flush()?;
 

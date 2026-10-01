@@ -24,7 +24,7 @@ mod translate;
 #[cfg(test)]
 mod integration;
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -101,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run_live(&cfg)
 }
 
-/// Offline: replay a recorded event file into a `ChartState` and print one frame.
+/// Offline: replay a recorded event file into a `ChartState` and print one frame
+/// (ANSI on a terminal, plain text when piped or redirected).
 fn run_replay(cfg: &Config, file: &str) -> io::Result<()> {
     let state = record::replay_file(
         Path::new(file),
@@ -114,9 +115,24 @@ fn run_replay(cfg: &Config, file: &str) -> io::Result<()> {
     let title = format!("source=replay · {file}");
     println!(
         "{}",
-        render::render_state(&state, &rcfg, ColorMode::Plain, &title)
+        render::render_state(
+            &state,
+            &rcfg,
+            replay_color(io::stdout().is_terminal()),
+            &title
+        )
     );
     Ok(())
+}
+
+/// Color for a replayed frame: ANSI only when stdout is a terminal, so redirected
+/// output stays escape-free and diffable.
+fn replay_color(stdout_is_tty: bool) -> ColorMode {
+    if stdout_is_tty {
+        ColorMode::Ansi
+    } else {
+        ColorMode::Plain
+    }
 }
 
 /// Live: connect to the engine, drain translated events, apply + render in a loop.
@@ -155,6 +171,8 @@ fn run_live(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = cfg
         .duration_secs
         .map(|s| Instant::now() + Duration::from_secs(s));
+
+    let mut painted_size = None;
 
     // The loop body is wrapped so that an error on any `?` below still reaches the
     // flush. Recorder writes go through a BufWriter with no Drop impl, so an early
@@ -205,7 +223,13 @@ fn run_live(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
             let chart = render::render_state(&state, &rcfg, ColorMode::Ansi, &title);
             last_render_us = t.elapsed().as_secs_f64() * 1e6;
 
-            queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+            // Frames fill the whole screen, so repaint in place; a full clear (which
+            // can flash a blank frame mid-write) is only needed when the size changes.
+            if painted_size != Some((cols, rows)) {
+                queue!(stdout, Clear(ClearType::All))?;
+                painted_size = Some((cols, rows));
+            }
+            queue!(stdout, MoveTo(0, 0))?;
             write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
             stdout.flush()?;
 
@@ -396,5 +420,11 @@ mod tests {
         let cfg = Config::from_args(&args);
         assert_eq!(cfg.replay.as_deref(), Some("e.txt"));
         assert_eq!(cfg.record, None);
+    }
+
+    #[test]
+    fn replay_colors_only_on_a_terminal() {
+        assert_eq!(replay_color(true), ColorMode::Ansi);
+        assert_eq!(replay_color(false), ColorMode::Plain);
     }
 }

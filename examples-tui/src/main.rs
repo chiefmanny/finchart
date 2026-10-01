@@ -147,11 +147,18 @@ fn main() -> io::Result<()> {
     execute!(stdout, EnterAlternateScreen, Hide)?;
     let _guard = TerminalGuard;
 
+    let mut painted_size = None;
     loop {
         let (cols, rows) = terminal::size().unwrap_or((120, 30));
         let chart = app.render(cols as usize, rows as usize);
 
-        queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+        // Frames fill the whole screen, so repaint in place; a full clear (which
+        // can flash a blank frame mid-write) is only needed when the size changes.
+        if painted_size != Some((cols, rows)) {
+            queue!(stdout, Clear(ClearType::All))?;
+            painted_size = Some((cols, rows));
+        }
+        queue!(stdout, MoveTo(0, 0))?;
         // Raw mode needs explicit carriage returns between rows.
         write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
         stdout.flush()?;
