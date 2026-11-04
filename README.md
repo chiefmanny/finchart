@@ -92,7 +92,7 @@ Recorded sessions replay through the same chart, frame by frame:
 
 ```bash
 scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 \
-  -- --interval-secs 1 --tick-size 0.01 --window 48 --heatmap
+  -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap
 ```
 
 <img src="docs/media/sweep.gif" width="100%"
@@ -104,11 +104,13 @@ participant buys 10,000 shares at once. The volume and delta panels spike on a
 single bar, almost all of it buyer-initiated (10,312 of 10,722 shares). The
 **heatmap** behind the bars, where red is resting asks and green is resting bids,
 shows the ask band being consumed and the book re-forming higher within seconds.
-The ladder recovers its depth; the price does not come back.
+The ladder recovers its depth; the price does not come back. Each bar is one
+second, and every layer in a column describes that same second. A second with no
+trades is a flat tick with no volume, not a gap.
 
 ```bash
 scripts/play-recording.sh web/scenarios/liquidity_crisis.txt --from 262 --to 326 \
-  -- --interval-secs 1 --tick-size 0.01 --window 48 --heatmap
+  -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap
 ```
 
 <img src="docs/media/crisis.gif" width="100%"
@@ -212,6 +214,11 @@ are a fixed 120×30.
 - **Exact price keys.** The book and heatmap key levels by integer tick
   (`round(price / tick_size)`), so repeated updates hit the same level and each
   side stays sorted. Prices remain `f64` at the API.
+- **A time-linear axis.** Every candle interval gets a bar: a quiet interval
+  becomes a flat, zero-volume candle, and each `Heartbeat` moves the clock forward
+  even when nothing trades. Heatmap columns, trade markers and annotations carry
+  timestamps and are drawn under the bar whose interval contains them, so every
+  layer of a column describes the same slice of time.
 - **Heartbeats set the heatmap cadence.** `MarketEvent::Heartbeat` records a
   heatmap column. The data source decides the sampling rate, and the book stays a
   faithful mirror of the feed.
@@ -279,11 +286,6 @@ This is a personal engineering project at version 0.1, not a published crate.
 The API is unstable.
 
 - **Text rendering only.** There is no Canvas or WebGPU backend.
-- **Heatmap and candles share the price axis, not the time axis.** The heatmap
-  draws one column per heartbeat, newest at the right edge. Candles exist only for
-  intervals that had trades, three columns each. Over a full window the spans
-  roughly line up, but individual columns do not correspond, and in sparse trading
-  they drift apart.
 - **Arrival-time bucketing.** The engine's fill messages carry no timestamp, so
   the live adapter stamps events on receipt. Live candles therefore depend on
   arrival timing. Replays are deterministic.

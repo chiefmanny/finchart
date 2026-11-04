@@ -16,7 +16,7 @@ Type "export PS1='$ ' && cargo build -q --release -p examples-matching-engine &&
 Wait /^\$ ?$/
 Show
 
-Type "scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 -- --interval-secs 1 --tick-size 0.01 --window 48 --heatmap"
+Type "scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap"
 Sleep 600ms
 Enter
 Sleep 6.8s

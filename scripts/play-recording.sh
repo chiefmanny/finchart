@@ -16,7 +16,7 @@
 # Everything after `--` goes to `examples-matching-engine --replay`, e.g.
 #
 #   scripts/play-recording.sh recordings/large_buy_sweep.txt --from 100 --to 200 \
-#       -- --interval-secs 1 --tick-size 0.01 --window 48 --heatmap
+#       -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap
 #
 # Needs a terminal of at least 120x31 (the replay frame is a fixed 120x30).
 set -euo pipefail
