@@ -1,0 +1,3 @@
+# Golden fixtures are compared byte for byte: never rewrite their line endings,
+# and collapse them in GitHub diffs and language stats.
+finchart/tests/golden/** -text linguist-generated=true

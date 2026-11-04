@@ -152,6 +152,10 @@ finchart replay artifacts/events.txt --at 5:00 > frame.txt          # one plain-
 finchart replay web/scenarios/normal_market.txt | head -3           # piped: the final frame, plain
 ```
 
+CI checks every one of these frames, plus replay frames of the recorded
+sessions, byte for byte against committed golden files in `finchart/tests/golden/`,
+so any visual change shows up as a failing test with the first differing line.
+
 `finchart scenario <name>` renders scripted book structures (`ask-wall`,
 `bid-wall`, `ask-wall-pulled`, `bid-wall-pulled`, `sweep`, `bid-reload`) to exercise
 the heatmap and trade-marker layers. The price line in those frames is a

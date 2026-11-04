@@ -5,6 +5,24 @@ renderer. Its purpose is to let humans and coding agents inspect concrete,
 reproducible rendered output after every change, and to catch regressions via text
 diffing and tests.
 
+## Golden files (automated)
+
+The deterministic outputs described below are also checked automatically.
+`cargo test` (and so CI) compares every frame `finchart snapshot chart|live` and
+`finchart scenario` write (all six scenarios; everything except `metrics.json`,
+whose timings vary), plus `finchart replay` frames of the recordings in
+`web/scenarios/`, byte for byte against fixtures in `finchart/tests/golden/`. A
+mismatch fails with the first differing line of each file. After an intended
+visual change, re-bless the fixtures and review what moved:
+
+```bash
+FINCHART_BLESS=1 cargo test -p finchart golden
+git diff finchart/tests/golden
+```
+
+The manual checklists below remain the guide for *why* a frame should look the
+way it does.
+
 For hands-on exploration there are interactive viewers (not part of the
 deterministic flow):
 

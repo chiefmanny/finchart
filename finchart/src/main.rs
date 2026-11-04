@@ -7,6 +7,8 @@ mod bench;
 mod browse;
 mod cli;
 mod frame;
+#[cfg(test)]
+mod golden;
 mod live;
 mod player;
 mod term;

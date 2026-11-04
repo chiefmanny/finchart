@@ -45,6 +45,7 @@ finchart browse                         # interactive viewer over 5,000 candles 
 finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4   # interactive player (space ←→ ↓↑ [] hjkl f m ?)
 finchart replay FILE --at 1:28          # print one frame (also when piped: plain text, final frame)
 finchart snapshot live artifacts/live   # deterministic before/mid/after frames
+FINCHART_BLESS=1 cargo test -p finchart golden   # re-bless golden fixtures after an intended visual change (then review git diff)
 finchart scenario sweep artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
 finchart record artifacts/feed/events.txt   # record the synthetic MarketEvent stream (with a `# finchart interval= tick=` header)
 cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt   # offline: replay an event file through the gRPC adapter (no engine)
@@ -292,7 +293,15 @@ See `docs/verification.md` for the full workflow and acceptance criteria.
 - Determinism is a hard requirement of the generator: same `GenConfig` ⇒
   byte-identical `CandleSeries`. There are tests guarding this — don't break it.
 - Benchmark timings are not asserted (nondeterministic); only structural
-  invariants (counts, memory estimate) are tested.
+  invariants (counts, column memory) are tested.
+- **Golden files.** `finchart/src/golden.rs` compares every deterministic frame
+  byte for byte against `finchart/tests/golden/`: everything `finchart snapshot
+  chart|live` and `finchart scenario <all six>` write (except the timing-bearing
+  `metrics.json`; the tests call the same writers), plus `finchart replay` frames
+  of the engine recordings at fixed moments. A visual change fails CI with the
+  first differing line per file. When a change is intended, re-bless and review:
+  `FINCHART_BLESS=1 cargo test -p finchart golden && git diff finchart/tests/golden`.
+  `.gitattributes` keeps the fixtures' bytes exact (`-text`).
 
 ## Out of scope for the MVP
 
