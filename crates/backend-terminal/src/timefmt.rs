@@ -13,6 +13,15 @@ pub(crate) fn format_utc(epoch_secs: i64) -> String {
     format!("{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
+/// Format `epoch_secs` (UTC) as `MM-DD HH:MM:SS`, for second-scale candles.
+pub(crate) fn format_utc_secs(epoch_secs: i64) -> String {
+    format!(
+        "{}:{:02}",
+        format_utc(epoch_secs),
+        epoch_secs.rem_euclid(60)
+    )
+}
+
 /// Convert days since the Unix epoch (1970-01-01) to a civil `(year, month,
 /// day)`. Howard Hinnant's `civil_from_days` algorithm; valid across the full
 /// proleptic Gregorian range and for negative inputs.
@@ -33,6 +42,12 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seconds_variant_includes_seconds() {
+        assert_eq!(format_utc_secs(0), "01-01 00:00:00");
+        assert_eq!(format_utc_secs(1_790_104_008), "09-22 19:06:48");
+    }
 
     #[test]
     fn epoch_zero_is_unix_origin() {

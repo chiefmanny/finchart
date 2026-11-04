@@ -160,6 +160,7 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
             heatmap: Some(HeatmapView::from_heatmap(heatmap, lo, hi)),
             trades: Some(TradeMarkers { markers }),
             annotations: Vec::new(),
+            crosshair: None,
             title: format!("scenario: {}", scenario_name(kind)),
         },
     );

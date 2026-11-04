@@ -73,6 +73,8 @@ pub struct ReplayArgs {
     /// Print the single frame at this time instead of playing.
     pub at: Option<f64>,
     pub heatmap: bool,
+    /// Open paused at `start` instead of playing.
+    pub paused: bool,
     /// Size of a printed frame.
     pub width: usize,
     pub height: usize,
@@ -107,7 +109,10 @@ pub fn usage(command: &str) -> &'static str {
             "finchart browse\n\n\
              Pan and zoom a deterministic 5,000-candle series. When candles outnumber the\n\
              screen columns they are aggregated into OHLC bars (see the status line).\n\n\
-             KEYS:\n    h l / ← →    pan\n    k j / + -    zoom in / out\n    r            reset\n    q / Esc      quit\n"
+             KEYS:\n    h l / ← →    pan\n    k j / + -    zoom in / out\n    r            reset\n    \
+             c            crosshair: read out a bar\n    , .          move the crosshair one bar\n    \
+             Esc          hide the crosshair, else quit\n    q            quit\n\n\
+             MOUSE:\n    hover for the crosshair, wheel to zoom, drag to pan\n"
         }
         "replay" => {
             "finchart replay <FILE> [OPTIONS]\n\n\
@@ -117,6 +122,7 @@ pub fn usage(command: &str) -> &'static str {
              OPTIONS:\n\
              \x20   --speed X       playback speed, 0.25 to 64 (default 1)\n\
              \x20   --start TIME    start this far in, as SECS or M:SS (default 0)\n\
+             \x20   --paused        open paused at the start time\n\
              \x20   --at TIME       print the frame at TIME and exit\n\
              \x20   --size WxH      size of a printed frame (default 120x30)\n\
              \x20   --interval S    candle interval in seconds (default: file header, else 1)\n\
@@ -127,7 +133,10 @@ pub fn usage(command: &str) -> &'static str {
              \x20   space  play / pause      ← →    seek 5 s       ↓ ↑  seek 30 s\n\
              \x20   [ ]    slower / faster   0 End  restart / end\n\
              \x20   h l    pan               k j    zoom           f    follow\n\
-             \x20   m      heatmap           ?      help           q    quit\n"
+             \x20   m      heatmap           ?      help           q    quit\n\
+             \x20   c      crosshair         , .    step it a bar  Esc  hide it\n\n\
+             MOUSE:\n\
+             \x20   hover for the crosshair, wheel to zoom, drag to pan\n"
         }
         "bench" => {
             "finchart bench\n\n\
@@ -271,6 +280,7 @@ fn replay_args(args: &mut Args) -> Result<ReplayArgs, String> {
         (w >= 20 && h >= 5).then_some((w, h))
     })?;
     let heatmap = !args.switch("--no-heatmap");
+    let paused = args.switch("--paused");
     let (width, height) = size.unwrap_or((120, 30));
     Ok(ReplayArgs {
         file: args.required("FILE")?.into(),
@@ -281,6 +291,7 @@ fn replay_args(args: &mut Args) -> Result<ReplayArgs, String> {
         start: start.unwrap_or(0.0),
         at,
         heatmap,
+        paused,
         width,
         height,
     })
@@ -475,11 +486,16 @@ mod tests {
                 start: 0.0,
                 at: None,
                 heatmap: true,
+                paused: false,
                 width: 120,
                 height: 30,
             }))
         );
         assert!(parse_str("replay").is_err());
+        let Ok(Command::Replay(a)) = parse_str("replay s.txt --start 1:28 --paused") else {
+            panic!("did not parse");
+        };
+        assert!(a.paused);
     }
 
     #[test]

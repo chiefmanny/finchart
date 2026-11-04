@@ -11,6 +11,7 @@ mod frame;
 mod golden;
 mod live;
 mod player;
+mod pointer;
 mod term;
 
 use std::io::{self, IsTerminal};
@@ -90,7 +91,9 @@ fn replay(args: ReplayArgs) -> io::Result<()> {
         return Ok(());
     }
     player.seek(args.start);
-    player.play();
+    if !args.paused {
+        player.play();
+    }
     player::run(player)
 }
 

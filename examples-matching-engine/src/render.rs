@@ -71,6 +71,7 @@ pub fn render_state(
             heatmap,
             trades: None,
             annotations: Vec::new(),
+            crosshair: None,
             title: title.to_string(),
         },
     )

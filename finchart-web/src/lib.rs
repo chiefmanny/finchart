@@ -243,6 +243,7 @@ impl WasmChart {
                 heatmap,
                 trades: None,
                 annotations: self.annotations.clone(),
+                crosshair: None,
                 title: self.status_line(),
             },
         )

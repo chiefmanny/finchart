@@ -2,7 +2,7 @@
 //! time axis). Plain (uncolored) output; ANSI color is layered on in a later step.
 
 use crate::grid::{CellColor, Grid};
-use crate::timefmt::format_utc;
+use crate::timefmt::{format_utc, format_utc_secs};
 use market_core::{BookSide, LiquidityHeatmap};
 use render_core::{aggregate, Bar, CulledView, PriceScale};
 
@@ -189,6 +189,15 @@ pub struct Annotation {
     pub label: String,
 }
 
+/// A crosshair at a screen position: the bar under `col` is highlighted and read
+/// out in the status line; `row`, when it falls in the price plot, adds a price
+/// rule and the price (and heatmap liquidity) at that row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crosshair {
+    pub col: usize,
+    pub row: Option<usize>,
+}
+
 /// Options for [`render_chart`].
 #[derive(Debug, Clone)]
 pub struct ChartOptions {
@@ -208,6 +217,9 @@ pub struct ChartOptions {
     pub trades: Option<TradeMarkers>,
     /// Labelled moments drawn into the price plot; empty draws nothing.
     pub annotations: Vec<Annotation>,
+    /// A crosshair; while it sits over a bar the status line reads that bar out
+    /// instead of showing `title`.
+    pub crosshair: Option<Crosshair>,
     /// Status-line prefix label (e.g. `finchart · SYNTH`); may be empty.
     pub title: String,
 }
@@ -225,6 +237,7 @@ impl Default for ChartOptions {
             heatmap: None,
             trades: None,
             annotations: Vec::new(),
+            crosshair: None,
             title: String::new(),
         }
     }
@@ -238,71 +251,44 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     if w == 0 || h == 0 {
         return String::new();
     }
-    // Need at least: title row + one plot row + time-axis row.
-    if h < 3 {
+    let Some(g) = Geometry::new(view, opts) else {
         return blank(w, h);
-    }
-
+    };
+    let Geometry {
+        depth_cols,
+        chart_width,
+        usable,
+        plot_top,
+        plot_rows,
+        volume_rows,
+        delta_rows,
+        price_min,
+        price_max,
+        gutter,
+        plot_cols,
+        cell,
+        ref bars,
+    } = g;
     let title_row = 0;
     let axis_row = h - 1;
-    let plot_top = 1;
-
-    // Reserve a fixed right strip for the optional depth panel; the chart (gutter
-    // + plot + bottom panels + time axis) uses the remaining width.
-    let depth_cols = if opts.depth.is_some() && w >= 60 {
-        DEPTH_PANEL_COLS
-    } else {
-        0
-    };
-    let chart_width = w - depth_cols;
-
-    // Rows between the title and time axis, split into price + optional panels.
-    // Each panel takes ~1/5–1/6 of the area (≥3 rows) but the price plot keeps ≥1.
-    let usable = h - 2;
-    let volume_rows = if opts.show_volume && usable >= 4 {
-        (usable / 5).max(3).min(usable - 1)
-    } else {
-        0
-    };
-    let delta_rows = if opts.show_delta {
-        let remaining = usable - volume_rows;
-        if remaining >= 4 {
-            (usable / 6).max(3).min(remaining - 1)
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-    let plot_rows = usable - volume_rows - delta_rows;
     let vol_top = plot_top + plot_rows;
     let delta_top = vol_top + volume_rows;
 
-    let (price_min, price_max) = view.price_extent().unwrap_or((0.0, 1.0));
     let lbl_max = price_label(price_max);
     let lbl_mid = price_label((price_min + price_max) / 2.0);
     let lbl_min = price_label(price_min);
-    let gutter = gutter_for(price_min, price_max);
 
-    let plot_cols = chart_width.saturating_sub(gutter);
-    if plot_cols == 0 {
-        return blank(w, h);
-    }
-
-    let cell = opts.style.cell_width();
-    let target_bars = (plot_cols / cell).max(1);
-    let bars = aggregate(view, target_bars);
-
-    let ps = PriceScale::new(price_min, price_max, plot_rows);
+    let ps = g.scale();
     let mut grid = Grid::new(w, h);
 
     // Overlays are placed in time: each lands in the bar whose span contains it.
-    let span = BarSpans::new(view, &bars, gutter, cell, plot_cols);
+    let span = BarSpans::new(view, bars, gutter, cell, plot_cols);
 
     // Background layer: liquidity heatmap drawn before the bars so candles sit on top.
-    if let Some(heatmap) = &opts.heatmap {
-        draw_heatmap(&mut grid, heatmap, &span, plot_top, plot_rows, &ps);
-    }
+    let heat = opts
+        .heatmap
+        .as_ref()
+        .and_then(|heatmap| draw_heatmap(&mut grid, heatmap, &span, plot_top, plot_rows, &ps));
     // Trade markers sit in a bar's right-hand column. A trade's price lies inside
     // its own bar, so with multi-column bars the markers go on top (that column only
     // holds the close tick); a one-column bar would be covered, so they go under it.
@@ -317,6 +303,26 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     for &(col, _) in &marks {
         for r in plot_top..plot_top + plot_rows {
             grid.set_styled(col, r, '┊', CellColor::Note);
+        }
+    }
+
+    // The crosshair snaps to the bar under its column; its rules sit under the bars.
+    let cross = opts.crosshair.and_then(|c| {
+        let bar = g.bar_at_col(c.col)?;
+        let row = c
+            .row
+            .filter(|r| (plot_top..plot_top + plot_rows).contains(r));
+        Some((bar, row))
+    });
+    if let Some((bar, row)) = cross {
+        let col = g.bar_center(bar);
+        for r in plot_top..plot_top + plot_rows {
+            grid.set_styled(col, r, '┆', CellColor::Note);
+        }
+        if let Some(r) = row {
+            for c in gutter..gutter + plot_cols {
+                grid.set_styled(c, r, '┄', CellColor::Note);
+            }
         }
     }
 
@@ -341,17 +347,26 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     if plot_rows >= 3 {
         put_label(&mut grid, gutter, plot_top + plot_rows / 2, &lbl_mid);
     }
+    // The crosshair's price wins over the fixed labels on its row.
+    if let Some((_, Some(r))) = cross {
+        put_label(
+            &mut grid,
+            gutter,
+            r,
+            &price_label(ps.row_to_price(r - plot_top)),
+        );
+    }
 
     // Optional volume panel under the price plot.
     if volume_rows > 0 {
-        draw_volume_panel(&mut grid, &bars, vol_top, volume_rows, gutter, cell);
+        draw_volume_panel(&mut grid, bars, vol_top, volume_rows, gutter, cell);
     }
 
     // Optional order-flow delta panel.
     if delta_rows > 0 {
         draw_delta_panel(
             &mut grid,
-            &bars,
+            bars,
             delta_top,
             delta_rows,
             gutter,
@@ -367,28 +382,211 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
         }
     }
 
-    // Status/title line and time axis.
-    let status = compose_status(opts, view.len(), bars.len(), price_min, price_max);
+    // Status line (or the crosshair's readout) and time axis.
+    let status = match cross {
+        Some((bar, row)) => {
+            let at = row.map(|r| {
+                let liq = heat
+                    .as_ref()
+                    .map(|cells| cells[bar * plot_rows + (r - plot_top)]);
+                (ps.row_to_price(r - plot_top), liq)
+            });
+            readout(&bars[bar], at)
+        }
+        None => compose_status(opts, view.len(), bars.len(), price_min, price_max),
+    };
     put_text(&mut grid, 0, title_row, &status);
-    draw_time_axis(&mut grid, &bars, axis_row, gutter, chart_width);
+    draw_time_axis(&mut grid, bars, axis_row, gutter, chart_width);
 
     grid_to_string(&grid, opts.color)
 }
 
 /// The number of bars [`render_chart`] will draw for `view` under `opts` (after
-/// display-resolution LOD). Shares the gutter/cell math with the renderer so
-/// callers can report LOD without guessing.
+/// display-resolution LOD). Shares the layout math with the renderer so callers
+/// can report LOD without guessing.
 pub fn rendered_bar_count(view: &CulledView, opts: &ChartOptions) -> usize {
-    if opts.width == 0 || opts.height < 3 {
-        return 0;
+    layout(view, opts).map_or(0, |l| l.bar_centers.len())
+}
+
+/// Where [`render_chart`] puts the price plot and each bar, in screen
+/// coordinates, so an interactive caller can map a mouse or cursor position onto
+/// the chart (or step a crosshair bar by bar). `None` when the frame is too small
+/// to hold a plot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    pub plot_left: usize,
+    pub plot_cols: usize,
+    pub plot_top: usize,
+    pub plot_rows: usize,
+    /// Columns per bar.
+    pub cell: usize,
+    /// The center column (the high-low line) of each drawn bar, left to right.
+    pub bar_centers: Vec<usize>,
+    scale: PriceScale,
+}
+
+impl Layout {
+    /// The price at screen `row`, if it is inside the price plot.
+    pub fn price_at(&self, row: usize) -> Option<f64> {
+        (self.plot_top..self.plot_top + self.plot_rows)
+            .contains(&row)
+            .then(|| self.scale.row_to_price(row - self.plot_top))
     }
-    let (price_min, price_max) = view.price_extent().unwrap_or((0.0, 1.0));
-    let plot_cols = opts.width.saturating_sub(gutter_for(price_min, price_max));
-    if plot_cols == 0 {
-        return 0;
+
+    /// The screen row `price` is drawn on (clamped to the price plot).
+    pub fn row_of(&self, price: f64) -> usize {
+        self.plot_top + self.scale.price_to_row(price) as usize
     }
-    let target = (plot_cols / opts.style.cell_width()).max(1);
-    view.len().min(target)
+}
+
+/// The layout [`render_chart`] would use for `view` under `opts`.
+pub fn layout(view: &CulledView, opts: &ChartOptions) -> Option<Layout> {
+    let g = Geometry::new(view, opts)?;
+    Some(Layout {
+        plot_left: g.gutter,
+        plot_cols: g.plot_cols,
+        plot_top: g.plot_top,
+        plot_rows: g.plot_rows,
+        cell: g.cell,
+        bar_centers: (0..g.bars.len()).map(|i| g.bar_center(i)).collect(),
+        scale: g.scale(),
+    })
+}
+
+/// One frame's geometry: the panel split, the price gutter, the plot area and the
+/// aggregated bars. Computed once and shared by [`render_chart`] and [`layout`].
+struct Geometry {
+    depth_cols: usize,
+    chart_width: usize,
+    /// Rows between the status line and the time axis.
+    usable: usize,
+    plot_top: usize,
+    plot_rows: usize,
+    volume_rows: usize,
+    delta_rows: usize,
+    price_min: f64,
+    price_max: f64,
+    gutter: usize,
+    plot_cols: usize,
+    cell: usize,
+    bars: Vec<Bar>,
+}
+
+impl Geometry {
+    /// `None` when the frame cannot hold a plot (it renders blank).
+    fn new(view: &CulledView, opts: &ChartOptions) -> Option<Self> {
+        let (w, h) = (opts.width, opts.height);
+        // Need at least: title row + one plot row + time-axis row.
+        if w == 0 || h < 3 {
+            return None;
+        }
+        // Reserve a fixed right strip for the optional depth panel; the chart (gutter
+        // + plot + bottom panels + time axis) uses the remaining width.
+        let depth_cols = if opts.depth.is_some() && w >= 60 {
+            DEPTH_PANEL_COLS
+        } else {
+            0
+        };
+        let chart_width = w - depth_cols;
+
+        // Rows between the title and time axis, split into price + optional panels.
+        // Each panel takes ~1/5–1/6 of the area (≥3 rows) but the price plot keeps ≥1.
+        let usable = h - 2;
+        let volume_rows = if opts.show_volume && usable >= 4 {
+            (usable / 5).max(3).min(usable - 1)
+        } else {
+            0
+        };
+        let delta_rows = if opts.show_delta {
+            let remaining = usable - volume_rows;
+            if remaining >= 4 {
+                (usable / 6).max(3).min(remaining - 1)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let plot_rows = usable - volume_rows - delta_rows;
+
+        let (price_min, price_max) = view.price_extent().unwrap_or((0.0, 1.0));
+        let gutter = gutter_for(price_min, price_max);
+        let plot_cols = chart_width.saturating_sub(gutter);
+        if plot_cols == 0 {
+            return None;
+        }
+        let cell = opts.style.cell_width();
+        let bars = aggregate(view, (plot_cols / cell).max(1));
+        Some(Self {
+            depth_cols,
+            chart_width,
+            usable,
+            plot_top: 1,
+            plot_rows,
+            volume_rows,
+            delta_rows,
+            price_min,
+            price_max,
+            gutter,
+            plot_cols,
+            cell,
+            bars,
+        })
+    }
+
+    fn scale(&self) -> PriceScale {
+        PriceScale::new(self.price_min, self.price_max, self.plot_rows)
+    }
+
+    /// The bar whose cell holds screen column `col`.
+    fn bar_at_col(&self, col: usize) -> Option<usize> {
+        let x = col.checked_sub(self.gutter)?;
+        (x < self.plot_cols && x / self.cell < self.bars.len()).then_some(x / self.cell)
+    }
+
+    /// The center column (the high-low line) of bar `i`.
+    fn bar_center(&self, i: usize) -> usize {
+        self.gutter + i * self.cell + self.cell / 2
+    }
+}
+
+/// The crosshair's status line: the bar's time, OHLC, volume and delta, then
+/// (when the cursor is on the price plot) the price there and, with a heatmap, the
+/// average resting bid / ask liquidity in that cell.
+fn readout(bar: &Bar, at: Option<(f64, Option<[f64; 2]>)>) -> String {
+    let delta = bar.delta();
+    let sign = if delta < 0.0 { "-" } else { "+" };
+    let mut s = format!(
+        "⌖ {} · O {} H {} L {} C {} · V {} · Δ {sign}{}",
+        format_utc_secs(bar.start_ts),
+        price_label(bar.open),
+        price_label(bar.high),
+        price_label(bar.low),
+        price_label(bar.close),
+        fmt_qty(bar.volume),
+        fmt_qty(delta.abs()),
+    );
+    if let Some((price, liq)) = at {
+        s.push_str(&format!(" · @ {}", price_label(price)));
+        if let Some([bid, ask]) = liq {
+            s.push_str(&format!(
+                " · liq bid {} / ask {}",
+                fmt_qty(bid),
+                fmt_qty(ask)
+            ));
+        }
+    }
+    s
+}
+
+/// A quantity for the readout: whole units below 1,000, else thousands to one
+/// decimal (`10.7k`).
+fn fmt_qty(v: f64) -> String {
+    if v >= 1_000.0 {
+        format!("{:.1}k", v / 1_000.0)
+    } else {
+        format!("{v:.0}")
+    }
 }
 
 /// A single price-axis label.
@@ -599,6 +797,7 @@ impl<'a> BarSpans<'a> {
 /// several columns share a bar, their liquidity is averaged per price row.
 /// Intensity is scaled by the **max rendered row total** (so cells span the ramp
 /// rather than saturate), and the dominant side colors it (green = bid, red = ask).
+/// Returns the averaged `[bid, ask]` liquidity per `(bar, row)` for the crosshair.
 fn draw_heatmap(
     grid: &mut Grid,
     heatmap: &HeatmapView,
@@ -606,10 +805,10 @@ fn draw_heatmap(
     plot_top: usize,
     plot_rows: usize,
     ps: &PriceScale,
-) {
+) -> Option<Vec<[f64; 2]>> {
     let nbars = span.bars.len();
-    if heatmap.columns.is_empty() || plot_rows == 0 || nbars == 0 {
-        return;
+    if plot_rows == 0 || nbars == 0 {
+        return None;
     }
 
     // Pass 1: accumulate per (bar, row) bid/ask liquidity and columns per bar.
@@ -641,7 +840,7 @@ fn draw_heatmap(
         }
     }
     if max_total <= 0.0 {
-        return;
+        return Some(cells);
     }
 
     // Pass 2: render glyph by intensity, color by dominant side, across the cell.
@@ -663,6 +862,7 @@ fn draw_heatmap(
             }
         }
     }
+    Some(cells)
 }
 
 /// Draw executed-trade markers: `▲` buy (green) / `▼` sell (red), at the trade's
@@ -989,6 +1189,7 @@ mod tests {
             heatmap: None,
             trades: None,
             annotations: Vec::new(),
+            crosshair: None,
             title: "finchart · SYNTH".to_string(),
         }
     }
@@ -1588,5 +1789,131 @@ mod tests {
             label: "NOW".to_string(),
         }];
         assert!(render_chart(&view, &o).contains("NOW"));
+    }
+
+    // --- crosshair & layout -----------------------------------------------------
+
+    fn quad_opts() -> ChartOptions {
+        let mut o = opts(120, 14, Style::OhlcBars);
+        o.show_volume = true;
+        o
+    }
+
+    fn quad_view(s: &CandleSeries) -> render_core::CulledView<'_> {
+        cull(s, &Viewport::full(s.len()))
+    }
+
+    fn col_has(out: &str, col: usize, glyph: char) -> bool {
+        out.lines().any(|l| l.chars().nth(col) == Some(glyph))
+    }
+
+    #[test]
+    fn layout_puts_each_bar_center_on_its_high_low_line() {
+        let s = quad();
+        let o = quad_opts();
+        let out = render_chart(&quad_view(&s), &o);
+        let layout = layout(&quad_view(&s), &o).unwrap();
+        assert_eq!(layout.bar_centers.len(), 4);
+        for &col in &layout.bar_centers {
+            assert!(
+                col_has(&out, col, '│'),
+                "no bar line at column {col}:\n{out}"
+            );
+        }
+        assert_eq!(rendered_bar_count(&quad_view(&s), &o), 4);
+    }
+
+    #[test]
+    fn layout_and_bar_count_leave_room_for_the_depth_panel() {
+        let s = gen(500);
+        let view = cull(&s, &Viewport::full(s.len()));
+        let mut o = opts(120, 30, Style::OhlcBars);
+        o.depth = Some(depth_panel());
+        let l = layout(&view, &o).unwrap();
+        assert!(l.plot_left + l.plot_cols <= 120 - DEPTH_PANEL_COLS);
+        assert_eq!(rendered_bar_count(&view, &o), l.bar_centers.len());
+        assert_eq!(
+            l.bar_centers.len(),
+            l.plot_cols / Style::OhlcBars.cell_width()
+        );
+    }
+
+    #[test]
+    fn crosshair_draws_rules_and_reads_out_the_bar_under_it() {
+        let s = quad();
+        let mut o = quad_opts();
+        let l = layout(&quad_view(&s), &o).unwrap();
+        let row = l.row_of(100.5);
+        o.crosshair = Some(Crosshair {
+            col: l.bar_centers[1],
+            row: Some(row),
+        });
+        let out = render_chart(&quad_view(&s), &o);
+        let status = out.lines().next().unwrap();
+        assert!(status.starts_with("⌖ 01-01 00:01:00"), "{status}");
+        assert!(
+            status.contains("O 99.00 H 99.20 L 99.00 C 99.00"),
+            "{status}"
+        );
+        assert!(
+            status.contains(&format!("@ {:.2}", l.price_at(row).unwrap())),
+            "{status}"
+        );
+        // A vertical rule above the bar and a horizontal rule across the plot.
+        assert!(
+            col_has(&out, l.bar_centers[1], '┆'),
+            "no vertical rule:\n{out}"
+        );
+        let line: Vec<char> = out.lines().nth(row).unwrap().chars().collect();
+        assert!(line.contains(&'┄'), "no horizontal rule:\n{out}");
+        assert_eq!(out.lines().count(), 14);
+        for line in out.lines() {
+            assert_eq!(line.chars().count(), 120);
+        }
+    }
+
+    #[test]
+    fn crosshair_reads_the_heatmap_liquidity_under_the_cursor() {
+        let s = quad();
+        let mut o = quad_opts();
+        let l = layout(&quad_view(&s), &o).unwrap();
+        o.heatmap = Some(HeatmapView {
+            columns: vec![(70, vec![(100.5, 1500.0, true)])],
+            max_liquidity: 1500.0,
+        });
+        o.crosshair = Some(Crosshair {
+            col: l.bar_centers[1],
+            row: Some(l.row_of(100.5)),
+        });
+        let out = render_chart(&quad_view(&s), &o);
+        let status = out.lines().next().unwrap();
+        assert!(status.contains("liq bid 1.5k / ask 0"), "{status}");
+    }
+
+    #[test]
+    fn crosshair_outside_the_bars_changes_nothing() {
+        let s = quad();
+        let plain = render_chart(&quad_view(&s), &quad_opts());
+        let l = layout(&quad_view(&s), &quad_opts()).unwrap();
+        for col in [0, l.plot_left - 1, *l.bar_centers.last().unwrap() + 10] {
+            let mut o = quad_opts();
+            o.crosshair = Some(Crosshair { col, row: Some(3) });
+            assert_eq!(render_chart(&quad_view(&s), &o), plain, "col {col}");
+        }
+    }
+
+    #[test]
+    fn crosshair_row_outside_the_price_plot_draws_only_the_time_rule() {
+        let s = quad();
+        let mut o = quad_opts();
+        let l = layout(&quad_view(&s), &o).unwrap();
+        o.crosshair = Some(Crosshair {
+            col: l.bar_centers[2],
+            row: Some(l.plot_top + l.plot_rows + 1), // inside the volume panel
+        });
+        let out = render_chart(&quad_view(&s), &o);
+        assert!(!out.contains('┄'), "unexpected horizontal rule:\n{out}");
+        assert!(col_has(&out, l.bar_centers[2], '┆'));
+        assert!(!out.lines().next().unwrap().contains('@'));
     }
 }

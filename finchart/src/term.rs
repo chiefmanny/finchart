@@ -5,7 +5,7 @@
 use std::io::{self, Stdout, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -16,20 +16,38 @@ use crossterm::{execute, queue};
 pub struct Screen {
     stdout: Stdout,
     painted_size: Option<(u16, u16)>,
+    mouse: bool,
 }
 
 impl Screen {
     /// Enter raw mode and the alternate screen, hiding the cursor.
     pub fn enter() -> io::Result<Self> {
+        Self::open(false)
+    }
+
+    /// As [`enter`](Self::enter), and also capture the mouse (hover, wheel,
+    /// drag). Views that poll on a timer leave it off: mouse motion would wake
+    /// their loop constantly.
+    pub fn enter_with_mouse() -> io::Result<Self> {
+        Self::open(true)
+    }
+
+    fn open(mouse: bool) -> io::Result<Self> {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
-        if let Err(e) = execute!(stdout, EnterAlternateScreen, Hide) {
+        let entered = if mouse {
+            execute!(stdout, EnterAlternateScreen, Hide, EnableMouseCapture)
+        } else {
+            execute!(stdout, EnterAlternateScreen, Hide)
+        };
+        if let Err(e) = entered {
             let _ = disable_raw_mode();
             return Err(e);
         }
         Ok(Self {
             stdout,
             painted_size: None,
+            mouse,
         })
     }
 
@@ -57,6 +75,9 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
+        if self.mouse {
+            let _ = execute!(self.stdout, DisableMouseCapture);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(self.stdout, LeaveAlternateScreen, Show);
     }

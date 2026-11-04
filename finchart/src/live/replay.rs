@@ -205,6 +205,7 @@ impl Replay {
                 heatmap: self.show_heatmap.then(|| self.heatmap_view()),
                 trades: None,
                 annotations: Vec::new(),
+                crosshair: None,
                 title: title.to_string(),
             },
         )

@@ -37,6 +37,18 @@ impl PriceScale {
         let row = (frac * last as f64).round() as i32;
         row.clamp(0, last)
     }
+
+    /// The price at the center of `row` (clamped), the inverse of
+    /// [`price_to_row`](Self::price_to_row). A flat range or a single row maps to
+    /// the top of the range.
+    pub fn row_to_price(&self, row: usize) -> f64 {
+        let last = self.rows.saturating_sub(1);
+        if last == 0 || self.price_max <= self.price_min {
+            return self.price_max.max(self.price_min);
+        }
+        let frac = row.min(last) as f64 / last as f64;
+        self.price_max - frac * (self.price_max - self.price_min)
+    }
 }
 
 /// Maps an absolute candle index in `[start_index, start_index + count)` to a
@@ -77,6 +89,23 @@ impl TimeScale {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_to_price_inverts_price_to_row() {
+        let ps = PriceScale::new(100.0, 110.0, 11);
+        assert_eq!(ps.row_to_price(0), 110.0); // top row is the max
+        assert_eq!(ps.row_to_price(10), 100.0); // bottom row is the min
+        for row in 0..11 {
+            assert_eq!(ps.price_to_row(ps.row_to_price(row)), row as i32);
+        }
+    }
+
+    #[test]
+    fn row_to_price_handles_degenerate_scales() {
+        assert_eq!(PriceScale::new(5.0, 5.0, 10).row_to_price(3), 5.0); // flat
+        assert_eq!(PriceScale::new(1.0, 2.0, 1).row_to_price(0), 2.0); // one row
+        assert_eq!(PriceScale::new(1.0, 2.0, 4).row_to_price(99), 1.0); // clamped
+    }
 
     #[test]
     fn price_max_maps_to_top_row() {

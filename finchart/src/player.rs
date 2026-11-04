@@ -11,13 +11,14 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, MouseEvent};
 
-use backend_terminal::ColorMode;
+use backend_terminal::{ColorMode, Layout};
 use market_core::{parse_events, CandleSeries, ChartState, MarketEvent};
 use render_core::Viewport;
 
 use crate::frame::{self, Frame};
+use crate::pointer::{Nav, Pointer, ZOOM_IN, ZOOM_OUT};
 use crate::term::{is_quit, Screen};
 
 /// Candle interval when neither a flag nor the file's header gives one: the
@@ -99,12 +100,22 @@ pub enum Action {
     End,
     ToggleHeatmap,
     ToggleHelp,
+    /// Show the crosshair on the newest bar, or hide it.
+    ToggleCrosshair,
+    /// Move the crosshair one bar back / forward.
+    StepBack,
+    StepForward,
+    /// Hide the crosshair, or quit if it is not showing.
+    Escape,
     Quit,
     None,
 }
 
 /// Map a key to an action (mpv-style transport, browse-style navigation).
 pub fn action_for(key: KeyEvent) -> Action {
+    if key.code == KeyCode::Esc {
+        return Action::Escape;
+    }
     if is_quit(key) {
         return Action::Quit;
     }
@@ -125,6 +136,9 @@ pub fn action_for(key: KeyEvent) -> Action {
         KeyCode::End => Action::End,
         KeyCode::Char('m') => Action::ToggleHeatmap,
         KeyCode::Char('?') => Action::ToggleHelp,
+        KeyCode::Char('c') => Action::ToggleCrosshair,
+        KeyCode::Char(',') => Action::StepBack,
+        KeyCode::Char('.') => Action::StepForward,
         _ => Action::None,
     }
 }
@@ -145,6 +159,9 @@ pub struct Player {
     /// `None` follows the newest candle; `Some` is a viewport the user moved to.
     manual: Option<Viewport>,
     help: bool,
+    pointer: Pointer,
+    /// The terminal size frames are drawn at, for mapping the crosshair and mouse.
+    size: (usize, usize),
 }
 
 impl Player {
@@ -166,6 +183,8 @@ impl Player {
             speed: 1.0,
             manual: None,
             help: false,
+            pointer: Pointer::default(),
+            size: (120, 30),
         };
         player.fold_to_position();
         player
@@ -252,6 +271,10 @@ impl Player {
     pub fn act(&mut self, action: Action) -> bool {
         match action {
             Action::Quit => return false,
+            Action::Escape => return self.pointer.hide(),
+            Action::ToggleCrosshair => self.pointer.toggle(self.layout().as_ref()),
+            Action::StepBack => self.pointer.step(-1, self.layout().as_ref()),
+            Action::StepForward => self.pointer.step(1, self.layout().as_ref()),
             Action::TogglePlay => {
                 if !self.playing && self.position >= self.duration {
                     self.seek(0.0);
@@ -261,9 +284,10 @@ impl Player {
             Action::Seek(delta) => self.seek(self.position + delta),
             Action::Faster => self.speed = step_speed(self.speed, 1),
             Action::Slower => self.speed = step_speed(self.speed, -1),
-            Action::PanLeft | Action::PanRight | Action::ZoomIn | Action::ZoomOut => {
-                self.navigate(action)
-            }
+            Action::PanLeft => self.pan_by(-self.pan_step()),
+            Action::PanRight => self.pan_by(self.pan_step()),
+            Action::ZoomIn => self.zoom_by(ZOOM_IN),
+            Action::ZoomOut => self.zoom_by(ZOOM_OUT),
             Action::Follow => self.manual = None,
             Action::Restart => self.seek(0.0),
             Action::End => self.seek(self.duration),
@@ -272,6 +296,22 @@ impl Player {
             Action::None => {}
         }
         true
+    }
+
+    /// Handle a mouse event: hover moves the crosshair, the wheel zooms, a left
+    /// drag pans.
+    pub fn mouse(&mut self, ev: MouseEvent) {
+        let visible = self.viewport(self.size.0).candle_count();
+        match self.pointer.mouse(ev, self.layout().as_ref(), visible) {
+            Nav::Zoom(factor) => self.zoom_by(factor),
+            Nav::Pan(candles) => self.pan_by(candles),
+            Nav::None => {}
+        }
+    }
+
+    /// Remember the terminal size frames are drawn at.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        self.size = (width, height);
     }
 
     /// The viewport for a frame `width` columns wide.
@@ -292,13 +332,34 @@ impl Player {
         frame::render(
             &self.state,
             &self.viewport(width),
-            &Frame {
-                width,
-                height,
-                color,
-                heatmap: self.settings.heatmap,
-                title: &title,
-            },
+            &self.frame(width, height, color, &title),
+        )
+    }
+
+    fn frame<'a>(
+        &self,
+        width: usize,
+        height: usize,
+        color: ColorMode,
+        title: &'a str,
+    ) -> Frame<'a> {
+        Frame {
+            width,
+            height,
+            color,
+            heatmap: self.settings.heatmap,
+            crosshair: self.pointer.crosshair,
+            title,
+        }
+    }
+
+    /// The layout of a frame at the remembered size.
+    fn layout(&self) -> Option<Layout> {
+        let (w, h) = self.size;
+        frame::layout(
+            &self.state,
+            &self.viewport(w),
+            &self.frame(w, h, ColorMode::Plain, ""),
         )
     }
 
@@ -327,18 +388,24 @@ impl Player {
             .unwrap_or_else(|| (width.saturating_sub(CHROME_COLS) / 3).max(10))
     }
 
-    /// Pan or zoom, starting from what is on screen (leaves follow mode).
-    fn navigate(&mut self, action: Action) {
+    /// What is on screen now; pan and zoom start from it (and leave follow mode).
+    fn current_view(&self) -> Viewport {
+        self.manual.unwrap_or_else(|| self.viewport(self.size.0))
+    }
+
+    /// Keyboard pan step: a tenth of the window, at least one candle.
+    fn pan_step(&self) -> isize {
+        (self.current_view().candle_count() / 10).max(1) as isize
+    }
+
+    fn pan_by(&mut self, candles: isize) {
         let len = self.state.series().len();
-        // Width only matters when following; pan/zoom start from that view.
-        let vp = self.manual.unwrap_or_else(|| self.viewport(120));
-        let step = (vp.candle_count() / 10).max(1) as isize;
-        self.manual = Some(match action {
-            Action::PanLeft => vp.pan(-step, len),
-            Action::PanRight => vp.pan(step, len),
-            Action::ZoomIn => vp.zoom(0.8, len),
-            _ => vp.zoom(1.25, len),
-        });
+        self.manual = Some(self.current_view().pan(candles, len));
+    }
+
+    fn zoom_by(&mut self, factor: f64) {
+        let len = self.state.series().len();
+        self.manual = Some(self.current_view().zoom(factor, len));
     }
 
     /// Fold every not-yet-applied event at or before the clock.
@@ -407,8 +474,12 @@ const HELP: &[&str] = &[
     "  k j        zoom in / out",
     "  f          follow the newest candle",
     "  m          heatmap on / off",
+    "  c          crosshair: read out a bar",
+    "  , .        move the crosshair one bar",
+    "  mouse      hover: crosshair · wheel: zoom · drag: pan",
     "  ?          close this help",
-    "  q  Esc     quit",
+    "  Esc        hide the crosshair, else quit",
+    "  q          quit",
 ];
 
 /// The help text padded to exactly `width` × `height`.
@@ -431,18 +502,23 @@ fn help_screen(width: usize, height: usize) -> String {
 
 /// Play `player` in the terminal until a quit key.
 pub fn run(mut player: Player) -> io::Result<()> {
-    let mut screen = Screen::enter()?;
+    let mut screen = Screen::enter_with_mouse()?;
     let frame_dur = Duration::from_millis(33);
     let mut last = Instant::now();
     loop {
         let size = screen.size();
+        player.resize(size.0, size.1);
         screen.paint(&player.render(size.0, size.1, ColorMode::Ansi), size)?;
 
         if event::poll(frame_dur)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && !player.act(action_for(key)) {
-                    break;
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if !player.act(action_for(key)) {
+                        break;
+                    }
                 }
+                Event::Mouse(ev) => player.mouse(ev),
+                _ => {}
             }
         }
         let now = Instant::now();
@@ -720,5 +796,65 @@ mod tests {
         let p = Player::new("empty.txt", vec![], settings());
         assert_eq!(p.duration(), 0.0);
         assert_eq!(p.render(80, 20, ColorMode::Plain).lines().count(), 20);
+    }
+
+    // --- crosshair & mouse ------------------------------------------------------
+
+    fn mouse_at(kind: crossterm::event::MouseEventKind, col: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column: col,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn crosshair_keys_map_to_actions() {
+        assert_eq!(action_for(key(KeyCode::Char('c'))), Action::ToggleCrosshair);
+        assert_eq!(action_for(key(KeyCode::Char(','))), Action::StepBack);
+        assert_eq!(action_for(key(KeyCode::Char('.'))), Action::StepForward);
+        assert_eq!(action_for(key(KeyCode::Esc)), Action::Escape);
+        assert_eq!(action_for(key(KeyCode::Char('q'))), Action::Quit);
+    }
+
+    #[test]
+    fn escape_hides_the_crosshair_before_it_quits() {
+        let mut p = player();
+        p.seek(10.0);
+        p.act(Action::ToggleCrosshair);
+        assert!(p.render(120, 30, ColorMode::Plain).starts_with("⌖"));
+        assert!(p.act(Action::Escape), "first Esc only hides the crosshair");
+        assert!(!p.render(120, 30, ColorMode::Plain).starts_with("⌖"));
+        assert!(!p.act(Action::Escape), "second Esc quits");
+    }
+
+    #[test]
+    fn stepping_reads_out_an_earlier_bar() {
+        let mut p = player();
+        p.seek(10.0);
+        p.act(Action::ToggleCrosshair);
+        let newest = p.render(120, 30, ColorMode::Plain);
+        p.act(Action::StepBack);
+        let earlier = p.render(120, 30, ColorMode::Plain);
+        let status = |f: &str| f.lines().next().unwrap().to_string();
+        assert_ne!(status(&newest), status(&earlier));
+        assert!(status(&earlier).starts_with("⌖"));
+    }
+
+    #[test]
+    fn the_wheel_zooms_and_a_drag_pans_out_of_follow_mode() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut p = player();
+        p.seek(10.0);
+        p.mouse(mouse_at(MouseEventKind::ScrollUp, 60));
+        assert!(!p.is_following());
+        let zoomed = p.viewport(120);
+        p.act(Action::Follow);
+
+        p.mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 100));
+        p.mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), 30));
+        assert!(!p.is_following(), "a drag pans");
+        assert!(zoomed.candle_count() < p.state().series().len());
     }
 }

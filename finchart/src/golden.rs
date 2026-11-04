@@ -153,9 +153,47 @@ fn golden_replay_frames() {
         // Synthetic recording: interval and tick come from its `#` header.
         ("baseline.txt", "end", "baseline.end.txt"),
     ];
-    let files = frames
+    let mut files: Vec<(String, String)> = frames
         .iter()
         .map(|(recording, time, name)| (name.to_string(), replay_frame(recording, time)))
         .collect();
+    files.extend(crosshair_frames());
     check("replay", files);
+}
+
+/// The crosshair on the sweep bar from the keyboard (`c` then `,`), and from a
+/// mouse hover at a fixed screen cell (which adds the price and liquidity there).
+fn crosshair_frames() -> Vec<(String, String)> {
+    use crate::player::Action;
+    use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+    let open = || {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../web/scenarios/large_buy_sweep.txt");
+        let mut p = Player::open(&path, None, None, None, true).unwrap();
+        p.resize(120, 30);
+        p.seek(72.0);
+        p
+    };
+    let mut keys = open();
+    keys.act(Action::ToggleCrosshair);
+    keys.act(Action::StepBack);
+
+    let mut hover = open();
+    hover.mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 60,
+        row: 6,
+        modifiers: KeyModifiers::NONE,
+    });
+    vec![
+        (
+            "sweep.crosshair.keys.txt".to_string(),
+            keys.render(120, 30, ColorMode::Plain),
+        ),
+        (
+            "sweep.crosshair.hover.txt".to_string(),
+            hover.render(120, 30, ColorMode::Plain),
+        ),
+    ]
 }
