@@ -21,9 +21,7 @@ pub enum Command {
         fps: u64,
     },
     Browse,
-    Replay {
-        file: PathBuf,
-    },
+    Replay(ReplayArgs),
     Bench,
     Snapshot {
         kind: SnapshotKind,
@@ -48,36 +46,37 @@ pub enum SnapshotKind {
 }
 
 /// Every subcommand with its one-line summary, in `finchart help` order.
+#[rustfmt::skip]
 const COMMANDS: &[(&str, &str)] = &[
-    (
-        "live",
-        "Live synthetic market: candles forming tick by tick, order flow, depth",
-    ),
-    (
-        "browse",
-        "Pan and zoom 5,000 candles; aggregation keeps every frame screen-sized",
-    ),
-    (
-        "replay",
-        "Print the final frame of a recorded MarketEvent file",
-    ),
-    (
-        "bench",
-        "Demo chart plus the 10k / 100k / 1M generate-cull-render benchmark",
-    ),
-    (
-        "snapshot",
-        "Write deterministic frames + metrics for diffing (chart | live)",
-    ),
-    (
-        "scenario",
-        "Render a scripted order-book scenario (walls, pulls, sweeps)",
-    ),
-    (
-        "record",
-        "Write the seeded synthetic event stream to a file",
-    ),
+    ("live",     "Live synthetic market: candles forming tick by tick, order flow, depth"),
+    ("browse",   "Pan and zoom 5,000 candles; aggregation keeps every frame screen-sized"),
+    ("replay",   "Play a recorded session: pause, seek, speed, pan and zoom"),
+    ("bench",    "Demo chart plus the 10k / 100k / 1M generate-cull-render benchmark"),
+    ("snapshot", "Write deterministic frames + metrics for diffing (chart | live)"),
+    ("scenario", "Render a scripted order-book scenario (walls, pulls, sweeps)"),
+    ("record",   "Write the seeded synthetic event stream to a file"),
 ];
+
+/// Options for `finchart replay`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayArgs {
+    pub file: PathBuf,
+    /// Candle interval in seconds (else the file's header, else 1).
+    pub interval: Option<i64>,
+    /// Price tick size (else the file's header, else 0.01).
+    pub tick: Option<f64>,
+    /// Candles shown while following (else fit one per bar to the width).
+    pub window: Option<usize>,
+    pub speed: f64,
+    /// Seconds into the session to start at.
+    pub start: f64,
+    /// Print the single frame at this time instead of playing.
+    pub at: Option<f64>,
+    pub heatmap: bool,
+    /// Size of a printed frame.
+    pub width: usize,
+    pub height: usize,
+}
 
 const SCENARIOS: &str = "ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload";
 
@@ -111,8 +110,24 @@ pub fn usage(command: &str) -> &'static str {
              KEYS:\n    h l / ← →    pan\n    k j / + -    zoom in / out\n    r            reset\n    q / Esc      quit\n"
         }
         "replay" => {
-            "finchart replay <FILE>\n\n\
-             Fold a recorded MarketEvent file into a chart and print its final frame.\n"
+            "finchart replay <FILE> [OPTIONS]\n\n\
+             Play a recorded MarketEvent file at its own pace. Every frame is the exact\n\
+             chart state at that moment of the session. When stdout is not a terminal,\n\
+             or with --at, print one frame instead (plain text when piped).\n\n\
+             OPTIONS:\n\
+             \x20   --speed X       playback speed, 0.25 to 64 (default 1)\n\
+             \x20   --start TIME    start this far in, as SECS or M:SS (default 0)\n\
+             \x20   --at TIME       print the frame at TIME and exit\n\
+             \x20   --size WxH      size of a printed frame (default 120x30)\n\
+             \x20   --interval S    candle interval in seconds (default: file header, else 1)\n\
+             \x20   --tick T        price tick size (default: file header, else 0.01)\n\
+             \x20   --window N      candles shown while following (default: fit the width)\n\
+             \x20   --no-heatmap    start with the liquidity heatmap off\n\n\
+             KEYS:\n\
+             \x20   space  play / pause      ← →    seek 5 s       ↓ ↑  seek 30 s\n\
+             \x20   [ ]    slower / faster   0 End  restart / end\n\
+             \x20   h l    pan               k j    zoom           f    follow\n\
+             \x20   m      heatmap           ?      help           q    quit\n"
         }
         "bench" => {
             "finchart bench\n\n\
@@ -174,9 +189,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         "browse" => Command::Browse,
         "bench" => Command::Bench,
-        "replay" => Command::Replay {
-            file: args.required("FILE")?.into(),
-        },
+        "replay" => Command::Replay(replay_args(&mut args)?),
         "record" => Command::Record {
             file: args.required("FILE")?.into(),
         },
@@ -221,6 +234,71 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     Ok(command)
 }
 
+fn replay_args(args: &mut Args) -> Result<ReplayArgs, String> {
+    fn bad(flag: &str, value: &str, want: &str) -> String {
+        format!("finchart replay: {flag} needs {want}, got '{value}'")
+    }
+    /// Parse `--flag VALUE` with `parse`, which rejects out-of-range values.
+    fn valued<T>(
+        args: &mut Args,
+        flag: &str,
+        want: &str,
+        parse: impl Fn(&str) -> Option<T>,
+    ) -> Result<Option<T>, String> {
+        match args.flag(flag)? {
+            None => Ok(None),
+            Some(v) => parse(&v).map(Some).ok_or_else(|| bad(flag, &v, want)),
+        }
+    }
+
+    let interval = valued(args, "--interval", "a positive number of seconds", |v| {
+        v.parse::<i64>().ok().filter(|&n| n > 0)
+    })?;
+    let tick = valued(args, "--tick", "a positive price step", |v| {
+        v.parse::<f64>().ok().filter(|&t| t > 0.0)
+    })?;
+    let window = valued(args, "--window", "a positive candle count", |v| {
+        v.parse::<usize>().ok().filter(|&n| n > 0)
+    })?;
+    let speed = valued(args, "--speed", "a speed from 0.25 to 64", |v| {
+        v.parse::<f64>().ok().filter(|s| (0.25..=64.0).contains(s))
+    })?;
+    let start = valued(args, "--start", "SECS or M:SS", parse_time)?;
+    let at = valued(args, "--at", "SECS or M:SS", parse_time)?;
+    let size = valued(args, "--size", "WIDTHxHEIGHT, e.g. 120x30", |v| {
+        let (w, h) = v.split_once('x')?;
+        let (w, h): (usize, usize) = (w.parse().ok()?, h.parse().ok()?);
+        (w >= 20 && h >= 5).then_some((w, h))
+    })?;
+    let heatmap = !args.switch("--no-heatmap");
+    let (width, height) = size.unwrap_or((120, 30));
+    Ok(ReplayArgs {
+        file: args.required("FILE")?.into(),
+        interval,
+        tick,
+        window,
+        speed: speed.unwrap_or(1.0),
+        start: start.unwrap_or(0.0),
+        at,
+        heatmap,
+        width,
+        height,
+    })
+}
+
+/// Parse a time as seconds (`75`, `75.5`) or minutes and seconds (`1:15`).
+pub fn parse_time(text: &str) -> Option<f64> {
+    let secs = match text.split_once(':') {
+        None => text.parse::<f64>().ok()?,
+        Some((m, s)) => {
+            let m: u32 = m.parse().ok()?;
+            let s: f64 = s.parse().ok().filter(|s| (0.0..60.0).contains(s))?;
+            f64::from(m) * 60.0 + s
+        }
+    };
+    (secs >= 0.0 && secs.is_finite()).then_some(secs)
+}
+
 /// Resolve a command name to its `'static` spelling.
 fn command_name(name: &str) -> Result<&'static str, String> {
     COMMANDS
@@ -258,6 +336,15 @@ impl<'a> Args<'a> {
             .to_string();
         self.rest.drain(i..=i + 1);
         Ok(Some(value))
+    }
+
+    /// Take a bare `--name` switch, reporting whether it was present.
+    fn switch(&mut self, name: &str) -> bool {
+        let Some(i) = self.rest.iter().position(|a| *a == name) else {
+            return false;
+        };
+        self.rest.remove(i);
+        true
     }
 
     /// Take the next positional argument, if any.
@@ -373,6 +460,72 @@ mod tests {
         );
         let err = parse_str("scenario bogus").unwrap_err();
         assert!(err.contains("bid-reload"), "lists the valid names: {err}");
+    }
+
+    #[test]
+    fn replay_defaults() {
+        assert_eq!(
+            parse_str("replay web/scenarios/large_buy_sweep.txt"),
+            Ok(Command::Replay(ReplayArgs {
+                file: PathBuf::from("web/scenarios/large_buy_sweep.txt"),
+                interval: None,
+                tick: None,
+                window: None,
+                speed: 1.0,
+                start: 0.0,
+                at: None,
+                heatmap: true,
+                width: 120,
+                height: 30,
+            }))
+        );
+        assert!(parse_str("replay").is_err());
+    }
+
+    #[test]
+    fn replay_options() {
+        let Ok(Command::Replay(a)) = parse_str(
+            "replay s.txt --interval 60 --tick 0.05 --window 40 --speed 4 --start 0:56 --no-heatmap",
+        ) else {
+            panic!("did not parse");
+        };
+        assert_eq!(a.interval, Some(60));
+        assert_eq!(a.tick, Some(0.05));
+        assert_eq!(a.window, Some(40));
+        assert_eq!(a.speed, 4.0);
+        assert_eq!(a.start, 56.0);
+        assert!(!a.heatmap);
+
+        let Ok(Command::Replay(a)) = parse_str("replay s.txt --at 1:28.5 --size 100x24") else {
+            panic!("did not parse");
+        };
+        assert_eq!(a.at, Some(88.5));
+        assert_eq!((a.width, a.height), (100, 24));
+    }
+
+    #[test]
+    fn replay_rejects_bad_values() {
+        for bad in [
+            "replay s.txt --speed 0",
+            "replay s.txt --speed fast",
+            "replay s.txt --interval 0",
+            "replay s.txt --tick -1",
+            "replay s.txt --start soon",
+            "replay s.txt --at 1:75",
+            "replay s.txt --size 100",
+        ] {
+            assert!(parse_str(bad).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn times_parse_as_seconds_or_minutes_and_seconds() {
+        assert_eq!(parse_time("75"), Some(75.0));
+        assert_eq!(parse_time("1:15"), Some(75.0));
+        assert_eq!(parse_time("0:56.5"), Some(56.5));
+        assert_eq!(parse_time("-3"), None);
+        assert_eq!(parse_time("1:60"), None);
+        assert_eq!(parse_time("x"), None);
     }
 
     #[test]

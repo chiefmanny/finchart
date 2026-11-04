@@ -1,27 +1,17 @@
-//! Event record / replay: run the synthetic [`MarketEvent`] source, write the
-//! stream to a text file, and replay a recorded file back through a
-//! [`ChartState`] — proving the neutral event path is source-agnostic. A future
-//! file/gRPC adapter plugs in here by producing the same events.
+//! Event recording (`finchart record`): run the synthetic [`MarketEvent`] source
+//! and write the stream to a text file that `finchart replay` (or the browser
+//! player) folds back through a [`ChartState`] — the same neutral path every
+//! source uses.
 
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};
-use market_core::{
-    events, parse_events, replay_events, serialize_events, BookSide, CandleSeries, ChartState,
-    DepthConfig, EventConfig, LiveConfig, MarketEvent,
-};
-use render_core::{cull, Viewport};
+use market_core::{events, serialize_events, DepthConfig, EventConfig, LiveConfig, MarketEvent};
 
 const TICK_SIZE: f64 = 0.05;
 const INTERVAL: i64 = 60;
-const HEATMAP_CAP: usize = 160;
-const WINDOW: usize = 60;
-const DEPTH_LEVELS: usize = 6;
 const RECORD_TRADES: usize = 400;
-const CHART_WIDTH: usize = 120;
-const CHART_HEIGHT: usize = 30;
 
 /// A fixed, deterministic synthetic event source config.
 fn feed_config() -> EventConfig {
@@ -67,59 +57,10 @@ fn collect_events(trades: usize) -> Vec<MarketEvent> {
     out
 }
 
-/// Fold an event slice into a fresh [`ChartState`].
-fn fold(evs: &[MarketEvent]) -> ChartState {
-    let mut state = ChartState::from_history(
-        CandleSeries::new(),
-        INTERVAL,
-        TICK_SIZE,
-        Some(HEATMAP_CAP),
-        WINDOW,
-    );
-    replay_events(&mut state, evs);
-    state
-}
-
-/// Render a follow-latest frame from a [`ChartState`] (heatmap on).
-fn render_state(state: &ChartState, title: &str) -> String {
-    let series = state.series();
-    let view = cull(series, &Viewport::tail(series.len(), WINDOW));
-    let (lo, hi) = view.price_extent().unwrap_or((0.0, 1.0));
-
-    let heatmap = state
-        .heatmap()
-        .map(|h| HeatmapView::from_heatmap(h, lo, hi));
-
-    let to_tuples = |side| {
-        state
-            .book()
-            .top_n(side, DEPTH_LEVELS)
-            .into_iter()
-            .map(|l| (l.price, l.size))
-            .collect()
-    };
-    let depth = DepthPanel {
-        bids: to_tuples(BookSide::Bid),
-        asks: to_tuples(BookSide::Ask),
-        spread: state.spread(),
-    };
-
-    render_chart(
-        &view,
-        &ChartOptions {
-            width: CHART_WIDTH,
-            height: CHART_HEIGHT,
-            color: ColorMode::Plain,
-            style: Style::OhlcBars,
-            show_volume: true,
-            show_delta: true,
-            depth: Some(depth),
-            heatmap,
-            trades: None,
-            annotations: Vec::new(),
-            title: title.to_string(),
-        },
-    )
+/// The `#` header `record` writes first, so `finchart replay` can pick up the
+/// candle interval and tick size the stream was generated with.
+pub(crate) fn header() -> String {
+    format!("# finchart interval={INTERVAL} tick={TICK_SIZE}\n")
 }
 
 /// Record the synthetic event stream to `path` (one event per line); returns the
@@ -131,56 +72,62 @@ pub(crate) fn record(path: &Path) -> io::Result<usize> {
         }
     }
     let evs = collect_events(RECORD_TRADES);
-    fs::write(path, serialize_events(&evs))?;
+    fs::write(path, header() + &serialize_events(&evs))?;
     Ok(evs.len())
-}
-
-/// Replay a recorded event file into a fresh [`ChartState`] and render a frame.
-pub(crate) fn replay(path: &Path) -> io::Result<String> {
-    let text = fs::read_to_string(path)?;
-    let state = fold(&parse_events(&text));
-    Ok(render_state(&state, "finchart REPLAY"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use market_core::{parse_events, replay_events, CandleSeries, ChartState};
+
+    use crate::player::Player;
+
+    /// Fold events into a fresh state with the recording's own settings.
+    fn fold(evs: &[MarketEvent]) -> ChartState {
+        let mut state =
+            ChartState::from_history(CandleSeries::new(), INTERVAL, TICK_SIZE, Some(8), 8);
+        replay_events(&mut state, evs);
+        state
+    }
 
     #[test]
     fn recorded_then_replayed_matches_direct_fold() {
         let evs = collect_events(300);
-        let direct = fold(&evs);
         // Round-trip through the text format and re-fold.
-        let parsed = market_core::parse_events(&market_core::serialize_events(&evs));
-        let replayed = fold(&parsed);
-        assert_eq!(direct, replayed);
+        let parsed = parse_events(&serialize_events(&evs));
+        assert_eq!(fold(&evs), fold(&parsed));
     }
 
     #[test]
-    fn rendered_frame_matches_after_record_replay() {
-        let evs = collect_events(300);
-        let direct = render_state(&fold(&evs), "finchart FEED");
-        let parsed = market_core::parse_events(&market_core::serialize_events(&evs));
-        let replayed = render_state(&fold(&parsed), "finchart FEED");
-        assert_eq!(direct, replayed);
-        assert_eq!(direct.lines().count(), CHART_HEIGHT);
+    fn a_recording_replays_with_the_settings_in_its_header() {
+        let dir = std::env::temp_dir().join(format!("finchart_header_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("events.txt");
+        record(&file).unwrap();
+
+        // No flags: interval and tick must come from the header.
+        let mut player = Player::open(&file, None, None, None, true).unwrap();
+        player.seek(player.duration());
+        let direct = fold(&collect_events(RECORD_TRADES));
+        assert_eq!(player.state().series(), direct.series());
+        assert_eq!(player.state().book(), direct.book());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn record_writes_a_file_and_replay_reads_it() {
+    fn record_writes_a_header_and_every_event() {
         let dir = std::env::temp_dir().join(format!("finchart_feed_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("events.txt");
 
         let n = record(&file).unwrap();
-        assert!(n > 0, "no events recorded");
-        assert!(file.exists(), "events file not written");
-
-        let frame = replay(&file).unwrap();
-        assert_eq!(frame.lines().count(), CHART_HEIGHT);
-        for line in frame.lines() {
-            assert_eq!(line.chars().count(), CHART_WIDTH);
-        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with(&header()), "missing header");
+        let events = parse_events(&text);
+        assert_eq!(events.len(), n);
+        assert_eq!(events, collect_events(RECORD_TRADES));
 
         std::fs::remove_dir_all(&dir).ok();
     }

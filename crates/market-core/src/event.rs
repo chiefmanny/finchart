@@ -21,6 +21,18 @@ pub enum MarketEvent {
     Heartbeat { ts: i64 },
 }
 
+impl MarketEvent {
+    /// When the event happened (epoch seconds).
+    pub fn ts(&self) -> i64 {
+        match self {
+            MarketEvent::Trade(t) => t.ts,
+            MarketEvent::DepthSnapshot(s) => s.ts,
+            MarketEvent::DepthUpdate(u) => u.ts,
+            MarketEvent::Heartbeat { ts } => *ts,
+        }
+    }
+}
+
 /// Serialize one event to a single text line (no trailing newline). Uses `f64`'s
 /// shortest round-trip `Display`, so `parse_event` recovers it exactly.
 pub fn serialize_event(ev: &MarketEvent) -> String {
@@ -55,7 +67,7 @@ pub fn serialize_events(events: &[MarketEvent]) -> String {
 }
 
 /// Parse an event stream, skipping blank lines and silently dropping any
-/// unparseable line.
+/// unparseable line (including `#` comment lines, which can carry a header).
 pub fn parse_events(text: &str) -> Vec<MarketEvent> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
@@ -252,6 +264,38 @@ mod tests {
             bids: vec![],
             asks: vec![],
         }));
+    }
+
+    #[test]
+    fn every_event_reports_its_timestamp() {
+        let trade = MarketEvent::Trade(Tick {
+            ts: 1,
+            price: 100.0,
+            size: 1.0,
+            side: None,
+        });
+        let snap = MarketEvent::DepthSnapshot(DepthSnapshot {
+            ts: 2,
+            bids: vec![],
+            asks: vec![],
+        });
+        let upd = MarketEvent::DepthUpdate(DepthUpdate {
+            ts: 3,
+            side: BookSide::Bid,
+            price: 99.0,
+            size: 1.0,
+        });
+        let hb = MarketEvent::Heartbeat { ts: 4 };
+        assert_eq!([trade.ts(), snap.ts(), upd.ts(), hb.ts()], [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn comment_lines_are_skipped() {
+        assert_eq!(parse_event("# finchart interval=60 tick=0.05"), None);
+        assert_eq!(
+            parse_events("# header\nH 5\n"),
+            vec![MarketEvent::Heartbeat { ts: 5 }]
+        );
     }
 
     #[test]
