@@ -1,5 +1,8 @@
 # finchart
 
+[![CI](https://github.com/chiefmanny/finchart/actions/workflows/ci.yml/badge.svg)](https://github.com/chiefmanny/finchart/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A terminal-first financial charting engine in Rust. Live candles, order flow,
 Level 2 depth and a liquidity heatmap, rendered as plain text that runs in any
 terminal and over SSH.
@@ -47,7 +50,8 @@ book reacted.
 
 - [In the terminal](#in-the-terminal) · [Quick start](#quick-start) ·
   [How it works](#how-it-works) · [Performance](#performance) ·
-  [Limitations](#limitations-and-status) · [Layout](#repository-layout)
+  [Limitations](#limitations-and-status) · [Layout](#repository-layout) ·
+  [License](#license)
 
 ## In the terminal
 
@@ -321,3 +325,17 @@ docs/media/render.sh        # all four, or one of: live tui sweep crisis
 Each `docs/media/<name>.tape` is the script for one recording. `render.sh` builds
 the binaries, runs the tape, and re-encodes the output to a 10 fps, 64-color GIF
 plus a static PNG still (`docs/media/*.png`) for places that can't play GIFs.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
