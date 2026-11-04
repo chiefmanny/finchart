@@ -1,6 +1,6 @@
 //! Render a [`ChartState`] to a terminal frame + build the adapter status line.
 //! Reuses `backend-terminal`'s `render_chart` (same pattern as
-//! `examples-live/feed.rs`); kept local so `backend-terminal` stays decoupled from
+//! `finchart/src/frame.rs`); kept local so `backend-terminal` stays decoupled from
 //! `ChartState`.
 
 use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};

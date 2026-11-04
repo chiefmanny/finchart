@@ -9,18 +9,18 @@ For hands-on exploration there are interactive viewers (not part of the
 deterministic flow):
 
 ```bash
-cargo run -p examples-tui --release    # static: pan h/l ←/→  zoom k/j +/-  reset r  quit q
-cargo run -p examples-live --release   # live replay: follows the forming candle (--fps N); quit q
+cargo run --release -p finchart -- browse    # static: pan h/l ←/→  zoom k/j +/-  reset r  quit q
+cargo run --release -p finchart -- live   # live replay: follows the forming candle (--fps N); quit q
 ```
 
 This doc has two deterministic snapshot flows: the **static chart** snapshot
-(`examples-bench`, below) and the **live replay** snapshot (`examples-live`, see
+(`finchart snapshot chart`, below) and the **live replay** snapshot (`finchart snapshot live`, see
 "Live replay verification").
 
 ## Command
 
 ```bash
-cargo run -p examples-bench --release -- --snapshot artifacts/tui
+cargo run --release -p finchart -- snapshot chart artifacts/tui
 ```
 
 The argument is the output directory (created if missing). `artifacts/tui` is the
@@ -37,7 +37,7 @@ terminal-size dependence:
 | viewport | indices `[300, 420)` → 120 visible candles |
 | chart size | 120 columns × 30 rows |
 
-These are defined in `examples-bench/src/snapshot.rs`. Changing them changes the
+These are defined in `finchart/src/bench/snapshot.rs`. Changing them changes the
 golden output, so treat them as fixtures.
 
 ## Chart layout (V2)
@@ -115,7 +115,7 @@ A snapshot is acceptable when:
       byte-identical across runs. Verify:
       ```bash
       cp artifacts/tui/chart.ohlc.plain.txt /tmp/prev.txt
-      cargo run -q -p examples-bench --release -- --snapshot artifacts/tui
+      cargo run -q --release -p finchart -- snapshot chart artifacts/tui
       diff /tmp/prev.txt artifacts/tui/chart.ohlc.plain.txt && echo "deterministic"
       ```
       Note: `metrics.json` contains wall-clock timings that vary per run, so it is
@@ -130,14 +130,14 @@ a delta panel, a synthetic order book shown in a right-side depth panel, and the
 book's liquidity accumulated over time into a background heatmap layer.
 
 ```bash
-cargo run -p examples-live --release -- --snapshot artifacts/live
+cargo run --release -p finchart -- snapshot live artifacts/live
 ```
 
 Fixed, deterministic inputs (no wall-clock, no terminal size): seed 42, 200
 history candles, 60s interval, 30 ticks/candle, 60-candle follow window, 120×30
 chart. Three frames are captured at fixed tick offsets around a candle boundary
 (just opened / half formed / just after roll-over). Defined in
-`examples-live/src/snapshot.rs`.
+`finchart/src/live/snapshot.rs`.
 
 ### Files produced
 
@@ -192,7 +192,7 @@ heatmap's `liq`/`cells`.
 - [ ] **Deterministic for the same seed** — frame text is byte-identical across runs:
       ```bash
       cp artifacts/live/frame.mid.plain.txt /tmp/prev.txt
-      cargo run -q -p examples-live --release -- --snapshot artifacts/live
+      cargo run -q --release -p finchart -- snapshot live artifacts/live
       diff /tmp/prev.txt artifacts/live/frame.mid.plain.txt && echo "deterministic"
       ```
       (`metrics.json` timings vary per run; the frame text does not.)
@@ -203,14 +203,14 @@ Makes the heatmap interpretable by rendering deterministic market-structure
 fixtures with the side-aware heatmap + executed-trade markers.
 
 ```bash
-cargo run -p examples-live --release -- --scenario <name> --snapshot artifacts/scenario
+cargo run --release -p finchart -- scenario <name> artifacts/scenario
 # names: ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload
 ```
 
 Each scenario emits `frame.before/mid/after.plain.txt`, `frame.mid.html`, and a
 `metrics.json` with `scenario`, `steps`, heatmap stats, and `trade_markers`. The
 runner zooms the price view to the book so structure is legible. Fixtures and
-config are in `examples-live/src/scenarios.rs` and `market-core`'s `scenario`
+config are in `finchart/src/live/scenarios.rs` and `market-core`'s `scenario`
 module.
 
 ### Acceptance criteria
@@ -221,7 +221,7 @@ module.
       price (it dominates the faint `·` ladder); `metrics.json` `max_liquidity`
       equals the wall size:
       ```bash
-      cargo run -q -p examples-live --release -- --scenario ask-wall --snapshot artifacts/scenario
+      cargo run -q --release -p finchart -- scenario ask-wall artifacts/scenario
       grep -E '"scenario"|"max_liquidity"' artifacts/scenario/metrics.json   # ask-wall, 200
       grep -o '▓' artifacts/scenario/frame.mid.plain.txt | wc -l             # wall band cells
       ```
@@ -238,26 +238,31 @@ All ingestion flows through one neutral path — `MarketEvent` → `ChartState::
 serialize to a tiny line-based text format for deterministic record/replay.
 
 ```bash
-cargo run -p examples-live --release -- --record artifacts/feed/events.txt
-cargo run -p examples-live --release -- --replay artifacts/feed/events.txt
+cargo run --release -p finchart -- record artifacts/feed/events.txt
+cargo run --release -p finchart -- replay artifacts/feed/events.txt          # interactive player
+cargo run --release -p finchart -- replay artifacts/feed/events.txt --at 5:00   # one frame
 ```
+
+`replay` plays interactively on a terminal; with `--at TIME`, or when its output
+is piped, it prints one frame (the final one unless `--at` says otherwise).
 
 ### Acceptance criteria
 
-- [ ] **Record writes a readable event stream.** Each line is one event
-      (`T`/`S`/`U`/`H`); the file starts with a seeding `S` (snapshot) + `H`
+- [ ] **Record writes a readable event stream.** After a `# finchart interval=60
+      tick=0.05` header (parsers skip `#` lines; `replay` reads it), each line is
+      one event (`T`/`S`/`U`/`H`), starting with a seeding `S` (snapshot) + `H`
       (heartbeat):
       ```bash
-      cargo run -q -p examples-live --release -- --record artifacts/feed/events.txt
-      head -2 artifacts/feed/events.txt    # S … | …   then   H …
+      cargo run -q --release -p finchart -- record artifacts/feed/events.txt
+      head -3 artifacts/feed/events.txt    # # finchart …   then   S … | …   then   H …
       ```
 - [ ] **Replay reproduces the state.** Replaying a recorded file folds back into the
       same `ChartState` and renders a fixed-dimension frame (verified in tests via
       `ChartState: PartialEq` over record → serialize → parse → replay).
-- [ ] **Replay is deterministic** — the printed frame is byte-identical across runs:
+- [ ] **Replay is deterministic** — the printed (piped) frame is byte-identical across runs:
       ```bash
-      cargo run -q -p examples-live --release -- --replay artifacts/feed/events.txt > /tmp/a.txt
-      cargo run -q -p examples-live --release -- --replay artifacts/feed/events.txt > /tmp/b.txt
+      cargo run -q --release -p finchart -- replay artifacts/feed/events.txt > /tmp/a.txt
+      cargo run -q --release -p finchart -- replay artifacts/feed/events.txt > /tmp/b.txt
       diff /tmp/a.txt /tmp/b.txt && echo "deterministic"
       ```
 
@@ -265,11 +270,11 @@ cargo run -p examples-live --release -- --replay artifacts/feed/events.txt
 
 `examples-matching-engine` is the isolated gRPC adapter. Its live mode needs a
 running matching engine, but everything else — translation, record/replay, render —
-runs offline and reuses the neutral event format, so an `examples-live` recording
+runs offline and reuses the neutral event format, so a `finchart record` recording
 replays straight through the adapter.
 
 ```bash
-cargo run -p examples-live --release -- --record artifacts/feed/events.txt
+cargo run --release -p finchart -- record artifacts/feed/events.txt
 cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt
 ```
 
@@ -280,7 +285,7 @@ cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt
       cargo tree -p market-core -e normal | grep -Ei 'tonic|tokio|prost' || echo "market-core clean"
       cargo tree -p backend-terminal -e normal | grep -Ei 'tonic|tokio|prost' || echo "backend-terminal clean"
       ```
-- [ ] **Cross-crate replay.** An `examples-live` recording folds through the
+- [ ] **Cross-crate replay.** A `finchart record` recording folds through the
       adapter into a fixed-dimension frame with a `source=replay` status line:
       ```bash
       cargo run -q -p examples-matching-engine -- --replay artifacts/feed/events.txt | head -1   # source=replay · …
@@ -332,37 +337,37 @@ Runs the full workspace suite, including:
 
 - OHLC **aggregation correctness** (`render-core`): single-bucket = overall OHLC,
   identity at `target == count`, invariants hold, volume conserved.
-- **Viewport pan/zoom bounds** (`render-core` + `examples-tui`): clamping at edges,
+- **Viewport pan/zoom bounds** (`render-core` + `finchart browse`): clamping at edges,
   zoom respects `MIN_CANDLES` / saturates to full range, reset restores default.
 - **Chart dimensions & style selection** (`backend-terminal`): exact width/height,
   OHLC ticks vs candle blocks.
-- **Snapshot** (`examples-bench`): determinism, no ANSI in plain output, fixed
+- **Snapshot** (`finchart bench`): determinism, no ANSI in plain output, fixed
   dimensions per style, HTML self-contained/escaped/preformatted with up/down
   colors, and `metrics.json` includes the required fields (incl. `rendered_bars`,
   `lod_active`, `style`).
-- **Live replay** (`market-core` + `examples-live`): candle-builder OHLCV
+- **Live replay** (`market-core` + `finchart`): candle-builder OHLCV
   invariants, ticks update the forming candle, interval boundary appends a new
   candle, same-seed tick streams and replays are deterministic, viewport follows
   the latest candle (`Viewport::tail`), and the live snapshot frames are
   byte-deterministic with the required `metrics.json` fields.
 - **Order flow** (`market-core` + `render-core` + `backend-terminal` +
-  `examples-live`): buy/sell volume accumulate by aggressor side, `delta = buy −
+  `finchart`): buy/sell volume accumulate by aggressor side, `delta = buy −
   sell`, rollover preserves a closed candle's flow, history flow sums to volume and
   skews with direction, flow is conserved through cull+aggregate, the delta panel
   keeps fixed dimensions with a baseline, and the live `metrics.json` carries the
   order-flow fields.
-- **Depth** (`market-core` + `backend-terminal` + `examples-live`): order-book
+- **Depth** (`market-core` + `backend-terminal` + `finchart`): order-book
   snapshot/update/delete, best bid/ask, spread, `top_n` sorting; deterministic
   synthetic depth that stays non-crossing with positive sizes; the depth panel
   keeps fixed dimensions; the replay book stays non-crossing and the live
   `metrics.json` carries the depth fields.
-- **Heatmap** (`market-core` + `backend-terminal` + `examples-live`): rolling-window
+- **Heatmap** (`market-core` + `backend-terminal` + `finchart`): rolling-window
   liquidity store (record, eviction at capacity, price-bucket mapping,
   `cells_in_price_range`, side-aware export, determinism); the heatmap renders as a
   fixed-dimension side-coloured background layer with no full blocks, candles drawn
   on top; the replay records liquidity and the live `metrics.json` carries the
   heatmap fields.
-- **Scenarios & markers** (`market-core` + `backend-terminal` + `examples-live`):
+- **Scenarios & markers** (`market-core` + `backend-terminal` + `finchart`):
   deterministic scenario step generation (walls at expected prices, wall pulls,
   sweep buy trades, bid reload); trade markers render at the expected price/recency;
   the heatmap is off in the default interactive view; scenario frames are
@@ -374,7 +379,7 @@ Runs the full workspace suite, including:
   candle/flow/CVD, level2 → BBO, heartbeat → heatmap column) with no rendering; the
   channel-drain seam; record → replay reproduces the `ChartState`; and CLI arg
   parsing. The live gRPC path needs a server (integration/manual).
-- **Feed adapter** (`market-core` + `examples-live`): `MarketEvent` text round-trips
+- **Feed adapter** (`market-core` + `finchart`): `MarketEvent` text round-trips
   (each variant, empty sides, blank lines, garbage rejected); `ChartState::apply`
   folds trades→candles/flow, depth→book, heartbeat→heatmap with the expected
   `ApplyResult`; the same event stream yields the same final `ChartState`;
@@ -387,6 +392,6 @@ Runs the full workspace suite, including:
 
 ```bash
 cargo test
-cargo run -p examples-bench --release -- --snapshot artifacts/tui
+cargo run --release -p finchart -- snapshot chart artifacts/tui
 # inspect artifacts/tui/chart.ohlc.plain.txt (and chart.html for color)
 ```

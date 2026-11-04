@@ -43,7 +43,7 @@ wheel, `f` to follow the live edge.
 
 | File | Source | What to watch |
 |---|---|---|
-| `baseline.txt` | `examples-live --record` (seeded synthetic feed) | a steady two-sided reference market |
+| `baseline.txt` | `finchart record` (seeded synthetic feed) | a steady two-sided reference market |
 | `normal_market.txt` | matching-engine recording, 3 min | an ordinary session for comparison |
 | `large_buy_sweep.txt` | matching-engine recording, 3 min | a 10,000-share buy ~70 s in; the book refills, the price does not return |
 | `liquidity_crisis.txt` | matching-engine recording, 3 min | resting depth withdraws, then buying runs through the gap and the ask side empties |
@@ -64,13 +64,13 @@ Press `q` in the chart to stop; the file flushes on quit. Then add an entry to t
 `SCENARIOS` array in `main.js` (entries whose file is missing are skipped). The
 recorded prices/sizes are replay-parameter agnostic; only an entry's `interval` /
 `tick` / `heatmap` / `window` affect how the browser buckets candles. The
-`examples-live --scenario` structures (walls/sweeps) are snapshot-only — their
+`finchart scenario` structures (walls/sweeps) are snapshot-only — their
 candle line is decorative, not trade-driven — so they are not browser scenarios.
 
 A fresh synthetic baseline comes from:
 
 ```bash
-cargo run -p examples-live --release -- --record web/scenarios/baseline.txt
+cargo run --release -p finchart -- record web/scenarios/baseline.txt
 ```
 
 ## Embedding on a site

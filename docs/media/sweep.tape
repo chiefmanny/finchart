@@ -12,13 +12,22 @@ Set Theme "GitHub Dark"
 Set TypingSpeed 8ms
 
 Hide
-Type "export PS1='$ ' && cargo build -q --release -p examples-matching-engine && clear" Enter
+Type `export PS1='$ ' PATH="$PWD/target/release:$PATH" && clear` Enter
 Wait /^\$ ?$/
 Show
 
-Type "scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap"
+Type "finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4"
 Sleep 600ms
 Enter
-Sleep 6.8s
+# Play through the sweep (~1:11), rewind 10 s, watch it again, then pause.
+Sleep 6s
+Left
+Sleep 150ms
+Left
+Sleep 3.5s
+Space
+Sleep 1.5s
 Screenshot docs/media/sweep.raw.png
-Sleep 2.5s
+Sleep 500ms
+Hide
+Type "q"

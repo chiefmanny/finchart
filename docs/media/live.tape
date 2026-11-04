@@ -1,4 +1,4 @@
-# The synthetic live replay: seeded ticks fold into a forming candle, order flow
+# `finchart live`: seeded ticks fold into a forming candle, order flow
 # and a Level 2 book in real time.
 # Re-record with `docs/media/render.sh live` from the repository root.
 Output docs/media/live.raw.gif
@@ -12,15 +12,15 @@ Set Theme "GitHub Dark"
 Set TypingSpeed 8ms
 
 Hide
-Type "export PS1='$ ' && cargo build -q --release -p examples-live && clear" Enter
+Type `export PS1='$ ' PATH="$PWD/target/release:$PATH" && clear` Enter
 Wait /^\$ ?$/
 Show
 
-Type "cargo run -q --release -p examples-live -- --fps 12"
+Type "finchart live"
 Sleep 600ms
 Enter
 Sleep 8s
 Screenshot docs/media/live.raw.png
 Sleep 1s
+Hide
 Type "q"
-Sleep 300ms

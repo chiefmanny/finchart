@@ -1,4 +1,4 @@
-# The interactive viewer: zoom out from 200 candles to all 5,000 and back. The
+# `finchart browse`: zoom out from 200 candles to all 5,000 and back. The
 # status line shows display-resolution LOD (candles → bars) as the window grows.
 # Re-record with `docs/media/render.sh tui` from the repository root.
 Output docs/media/tui.raw.gif
@@ -12,11 +12,11 @@ Set Theme "GitHub Dark"
 Set TypingSpeed 8ms
 
 Hide
-Type "export PS1='$ ' && cargo build -q --release -p examples-tui && clear" Enter
+Type `export PS1='$ ' PATH="$PWD/target/release:$PATH" && clear` Enter
 Wait /^\$ ?$/
 Show
 
-Type "cargo run -q --release -p examples-tui"
+Type "finchart browse"
 Sleep 500ms
 Enter
 Sleep 1.8s
@@ -30,5 +30,5 @@ Type@250ms "hhhhhh"
 Sleep 800ms
 Type "r"
 Sleep 1.5s
+Hide
 Type "q"
-Sleep 300ms

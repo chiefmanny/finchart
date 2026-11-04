@@ -38,21 +38,23 @@ backends, live feeds) is described in `README.md` / `docs/research.md` but is
 ```bash
 cargo build                 # build the workspace
 cargo test                  # run all unit tests (run after every change)
-cargo run -p examples-tui --release     # interactive chart viewer (pan/zoom/reset/quit)
-cargo run -p examples-live --release            # live synthetic replay (follows the forming candle; --fps N)
-cargo run -p examples-live --release -- --snapshot artifacts/live  # deterministic before/mid/after frames
-cargo run -p examples-live --release -- --scenario sweep --snapshot artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
-cargo run -p examples-live --release -- --record artifacts/feed/events.txt    # record the synthetic MarketEvent stream to a text file
-cargo run -p examples-live --release -- --replay artifacts/feed/events.txt    # replay a recorded event file through ChartState and print a frame
+cargo install --path finchart           # install the `finchart` CLI (or: cargo run --release -p finchart -- <cmd>)
+finchart help                           # list commands; `finchart help <cmd>` for options
+finchart live                           # live synthetic replay (follows the forming candle; --fps N)
+finchart browse                         # interactive viewer over 5,000 candles (pan/zoom/reset/quit)
+finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4   # interactive player (space ←→ ↓↑ [] hjkl f m ?)
+finchart replay FILE --at 1:28          # print one frame (also when piped: plain text, final frame)
+finchart snapshot live artifacts/live   # deterministic before/mid/after frames
+finchart scenario sweep artifacts/scenario  # heatmap scenario (ask-wall, bid-wall, ask-wall-pulled, bid-wall-pulled, sweep, bid-reload)
+finchart record artifacts/feed/events.txt   # record the synthetic MarketEvent stream (with a `# finchart interval= tick=` header)
 cargo run -p examples-matching-engine -- --replay artifacts/feed/events.txt   # offline: replay an event file through the gRPC adapter (no engine)
 cargo run -p examples-matching-engine -- --endpoint http://host:50051 --symbol BTCUSD  # live: connect to the matching engine (needs a running server)
-scripts/play-recording.sh web/scenarios/large_buy_sweep.txt -- --interval-secs 1 --tick-size 0.01 --heatmap  # animate a recorded session (one --replay per heartbeat)
 docs/media/render.sh                    # re-record the README GIFs/PNGs from docs/media/*.tape (needs vhs + ffmpeg)
 cargo test -p finchart-web              # host unit tests for the WASM chart binding (no wasm needed)
 ./web/build.sh                          # build the WASM bundle -> web/pkg (needs wasm-pack + wasm32 target)
 python3 -m http.server --directory web  # serve the browser demo at http://localhost:8000
-cargo run -p examples-bench --release   # demo chart + 10k/100k/1M benchmark table
-cargo run -p examples-bench --release -- --snapshot artifacts/tui  # export deterministic render snapshots
+finchart bench                          # demo chart + 10k/100k/1M benchmark table
+finchart snapshot chart artifacts/tui   # export deterministic render snapshots
 cargo clippy --workspace --all-targets  # lint (keep clean)
 cargo fmt                   # format (keep clean; CI-style check: cargo fmt --check)
 ```
@@ -67,18 +69,15 @@ crates/
   market-core/       # Candle/CandleSeries, synth gen, live Tick/CandleBuilder/flow, depth OrderBook + LiquidityHeatmap, MarketEvent + ChartState, RNG
   render-core/       # Viewport (+ pan/zoom/tail), cull -> CulledView (zero-copy), aggregate -> LOD Bars, scales
   backend-terminal/  # render_chart: laid-out OHLC/candle chart (LOD, volume, axes); html export; pure
-examples-bench/      # binary: demo chart + benchmark table + deterministic snapshot export
-examples-tui/        # binary: interactive viewer (crossterm) — pan/zoom/reset/quit
-examples-live/       # binary: live synthetic replay (crossterm) — incremental candles, follow latest, snapshot, scenarios, record/replay
+finchart/            # binary `finchart` (crossterm): cli.rs (pure hand-rolled parser), term.rs (Screen), frame.rs, live/ (live, snapshot live, scenario, record), browse.rs, player.rs (replay), bench/ (bench, snapshot chart)
 examples-matching-engine/  # binary: gRPC matching-engine adapter — translate streams -> MarketEvent -> ChartState (tonic/tokio confined here)
 finchart-web/        # lib (cdylib+rlib): wasm-bindgen wrapper — WasmChart folds MarketEvent lines -> ChartState -> render_chart (ANSI); wasm-bindgen confined here
 web/                 # static browser demo: index.html + main.js (xterm.js) + build.sh + scenarios/*.txt; pkg/ is generated (gitignored)
 ```
 
 Dependency direction: `backend-terminal` → `render-core` → `market-core`.
-The example binaries depend on all three. `crossterm` is used **only** by the
-interactive binaries. The core crates stay **zero-dependency**: `crossterm` is
-confined to `examples-tui`/`examples-live`/`examples-matching-engine`, all
+The binaries depend on all three. The core crates stay **zero-dependency**:
+`crossterm` is confined to `finchart`/`examples-matching-engine`, all
 gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
 `examples-matching-engine`, and `wasm-bindgen` lives **only** in `finchart-web`
 (all verified via `cargo tree`). The adapter's vendored proto is compiled by
@@ -86,6 +85,17 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
 
 ## Architecture notes / conventions
 
+- **One CLI.** `finchart` absorbed the old `examples-live`/`-tui`/`-bench`
+  binaries (same code, now subcommands; their snapshot output is byte-identical).
+  `cli::parse` is pure and unit-tested (no clap); `term::Screen` owns raw mode +
+  the alternate screen and repaints in place (full clear only on resize);
+  `frame::render` is the standard ChartState frame (plot + heatmap + volume +
+  delta + ladder). `player::Player` is the `replay` core: a clock over the
+  recording's own timestamps that folds events up to it (seeking back refolds
+  from the start, so any second shows the exact state then), mpv-style keys,
+  pan/zoom/follow; terminal-free and tested. Settings resolve flags > the file's
+  `#` header > defaults (1 s, 0.01 — the engine recordings). The gRPC adapter
+  stays a separate binary so `finchart` never builds tonic/tokio.
 - **Columnar hot path.** Candles are stored as parallel `Vec`s (one per OHLCV
   field) in `CandleSeries`, not as a `Vec<Candle>`. `Candle` is a convenience
   accessor type. `CulledView` borrows column *slices* — culling is zero-copy.
@@ -157,7 +167,7 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
 - **Scenarios.** `market_core::scenario(ScenarioConfig)` produces deterministic
   market-structure step sequences (`ScenarioKind`: static/pulled ask/bid walls, ask
   sweep, bid reload) — each step a book snapshot + executed trades. The
-  `examples-live --scenario <name> --snapshot <dir>` runner renders them with the
+  `finchart scenario <name> [dir]` runner renders them with the
   heatmap + trade markers so structure (walls, pulls, sweeps) is legible.
 - **Neutral feed boundary.** All ingestion goes through one path:
   `market_core::MarketEvent` (`Trade`/`DepthSnapshot`/`DepthUpdate`/`Heartbeat`) →
@@ -166,7 +176,7 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   `Trade` folds a candle, depth events update the book, and `Heartbeat` is the
   neutral "end-of-bucket" tick that advances the candle clock (flat candles for
   quiet intervals) and records a heatmap column (so cadence is source-controlled,
-  not wired into the book). Both runners (`examples-live`
+  not wired into the book). Both runners (`finchart live`'s
   `Replay` and `scenarios`) build `MarketEvent`s and apply them — they no longer
   mutate the three structures directly. `DepthGen::step(ts, mid)` is **pure**: it
   returns a `DepthDelta` (`Snapshot`/`Updates`) instead of mutating a book.
@@ -180,16 +190,17 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   shortest round-trip) via `serialize_event(s)`/`parse_event(s)`;
   `replay_events(&mut ChartState, &[MarketEvent])` folds a recorded slice. Replaying
   recorded events into a fresh `ChartState` reproduces the original state exactly
-  (`ChartState: PartialEq`). The `examples-live --record <file>` / `--replay <file>`
-  modes wire this to disk.
+  (`ChartState: PartialEq`). `finchart record <file>` writes a stream (after a
+  `# finchart interval=… tick=…` header; parsers skip `#` lines) and `finchart
+  replay <file>` plays one; `MarketEvent::ts()` gives any event's time.
 - **Matching-engine adapter (isolated).** `examples-matching-engine` is the first
   real feed adapter: pure `translate` fns map gRPC `FillNotification →
   MarketEvent::Trade` and `Level2Response → DepthSnapshot`, async tokio producers
   (`Subscribe` stream, `GetLevel2` poll, `Heartbeat` ticker) push onto an `mpsc`
   channel, and a sync render loop drains it into a `ChartState` + `render_chart`.
   All gRPC/async deps are confined to this crate; the cores stay zero-dep. It reuses
-  the neutral event format, so `--replay <file>` runs offline and files interchange
-  with `examples-live`. The vendored `proto/matching_engine.proto` is a **faithful
+  the neutral event format, so `--replay <file>` runs offline and its recordings
+  play in `finchart replay`. The vendored `proto/matching_engine.proto` is a **faithful
   copy of the real service** (`package matchingengine`; `FillNotification` has
   `symbol` + integer `size`; `Level2Request` is `side=2, depth=3`, nested `Side` enum
   `BOTH=2`; levels are `PriceLevelData`) — wire-compatible. Aggressor side comes
@@ -237,12 +248,12 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   chrono, no "now", no locale.
 - **No external runtime dependencies in the core.** RNG, ANSI, JSON, HTML export,
   and the date formatter are hand-rolled (std only). `crossterm` is confined to the
-  interactive binaries (`examples-tui`, `examples-live`). Prefer minimal deps (see
+  binaries (`finchart`, `examples-matching-engine`). Prefer minimal deps (see
   `docs/mvp-implementation-plan.md` §10).
 
 ## Snapshot / verification workflow
 
-`cargo run -p examples-bench --release -- --snapshot <dir>` exports deterministic
+`finchart snapshot chart <dir>` exports deterministic
 render artifacts from fixed inputs (seed/count/viewport/size — no time or
 terminal-size dependence) for inspection and diffing after each change:
 
@@ -251,14 +262,14 @@ terminal-size dependence) for inspection and diffing after each change:
 - `chart.ansi.txt` — OHLC chart with ANSI colors.
 - `chart.html` — self-contained dark-bg monospace page (`<pre>`, up/down spans).
 - `metrics.json` — dataset/visible/`rendered_bars`/`lod_active`/`style`/size +
-  gen/cull/render timings + memory estimate.
+  gen/cull/render timings + column memory (`CandleSeries::column_bytes`).
 
 The four `chart.*` files are byte-deterministic (good golden files);
 `metrics.json` timings vary per run (its other fields are deterministic). Snapshot
-logic lives in `examples-bench/src/snapshot.rs`; JSON is hand-written (no
+logic lives in `finchart/src/bench/snapshot.rs`; JSON is hand-written (no
 `serde_json`) since the record is a flat fixed set of numbers.
 
-`cargo run -p examples-live --release -- --snapshot <dir>` is the **live** analogue:
+`finchart snapshot live <dir>` is the **live** analogue:
 fixed config + fixed advance points capture a forming candle just opened
 (`frame.before.plain.txt`), half formed with an expanded wick
 (`frame.mid.plain.txt`), and after roll-over (`frame.after.plain.txt`), plus
@@ -270,7 +281,7 @@ a **heatmap** background layer; `metrics.json` adds order-flow fields
 heatmap fields (`heatmap_time_buckets`, `heatmap_price_buckets`,
 `visible_heatmap_cells`, `max_liquidity`) on top of update/render timings. The
 three frame texts are byte-deterministic; timings are not. Logic lives in
-`examples-live/src/snapshot.rs`; HTML uses the shared `backend_terminal::html`.
+`finchart/src/live/snapshot.rs`; HTML uses the shared `backend_terminal::html`.
 
 See `docs/verification.md` for the full workflow and acceptance criteria.
 

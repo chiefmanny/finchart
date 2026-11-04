@@ -13,7 +13,7 @@ root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 
 # Build first so no tape waits on a compile.
-cargo build --quiet --release -p examples-live -p examples-tui -p examples-matching-engine
+cargo build --quiet --release -p finchart
 
 for name in "${@:-live tui sweep crisis}"; do
   for demo in $name; do

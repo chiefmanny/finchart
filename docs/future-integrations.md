@@ -61,7 +61,7 @@ nested `Side` enum where `BOTH=2`; depth levels are `PriceLevelData`). The adapt
 only calls `Subscribe` + `GetLevel2`, but the message field numbers and scalar types
 now line up on the wire. Record/replay reuses the neutral event text format, so
 `--replay <file>` works offline (no engine) and event files are interchangeable with
-`examples-live`. See `docs/matching-engine-adapter-v1-plan.md`.
+`finchart replay`. See `docs/matching-engine-adapter-v1-plan.md`.
 
 The engine's gRPC port (`cpp-server:50051`) is **internal to its Docker network by
 default**; expose it with a `ports: ["50051:50051"]` entry on the `cpp-server`

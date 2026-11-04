@@ -12,7 +12,7 @@ terminal and over SSH.
        alt="finchart's live terminal viewer: OHLC bars trending upward with the rightmost bar growing tick by tick, a volume panel, a delta panel of green and red bars around a baseline, and a six-level bid/ask depth ladder updating on the right. The status line shows the forming candle's OHLC, its delta and the session's cumulative delta.">
 </p>
 <p align="center"><sub>
-  <code>cargo run --release -p examples-live</code>: ticks fold into the forming
+  <code>finchart live</code>: ticks fold into the forming
   candle, the order-flow panels and the depth ladder in real time.
 </sub></p>
 
@@ -21,7 +21,7 @@ terminal and over SSH.
        alt="finchart's interactive terminal viewer zooming out from 200 candles to all 5,000 and back in. The status line counts candles and bars: '200 candles → 38 bars', then '5000 candles → 38 bars', showing the candles aggregated to fit the screen.">
 </p>
 <p align="center"><sub>
-  <code>cargo run --release -p examples-tui</code>: zoom from 200 candles to all
+  <code>finchart browse</code>: zoom from 200 candles to all
   5,000 and back. The bar count stays at what the screen can hold.
 </sub></p>
 
@@ -55,14 +55,16 @@ book reacted.
 
 ## In the terminal
 
-Every view below is a real run of a binary in this repository, recorded with
-[VHS](https://github.com/charmbracelet/vhs) from scripts in `docs/media/` (see
+Everything is one binary, `finchart` (install it with `cargo install --path
+finchart`; see [Quick start](#quick-start)). `finchart help` lists the commands and
+`finchart help <command>` their options. Every view below is a real run, recorded
+with [VHS](https://github.com/charmbracelet/vhs) from scripts in `docs/media/` (see
 [Re-recording the demos](#re-recording-the-demos)).
 
-### Live candle building — `examples-live`
+### Live candle building — `finchart live`
 
 ```bash
-cargo run --release -p examples-live            # q / Esc quits; --fps N sets the pace
+finchart live            # q / Esc quits; --fps N sets the pace
 ```
 
 A seeded synthetic tick stream (`seed = 42`, so the data is identical every run)
@@ -74,10 +76,10 @@ delta (`Δ`), the session's cumulative delta (`CVD`), and best bid/ask and sprea
 On a wide enough terminal it also shows the last frame's update and render time in
 microseconds. On the right is a six-level **Level 2 ladder**.
 
-### Navigating history — `examples-tui`
+### Navigating history — `finchart browse`
 
 ```bash
-cargo run --release -p examples-tui             # h/l or ←/→ pan · k/j or +/- zoom · r reset · q quit
+finchart browse          # h/l or ←/→ pan · k/j or +/- zoom · r reset · q quit
 ```
 
 A 5,000-candle deterministic series in a pan-and-zoom viewer. Watch the status
@@ -86,14 +88,18 @@ columns, finchart **aggregates** them into bars that keep the true open, high,
 low, close and summed volume, instead of overplotting. Render cost therefore
 follows the size of the terminal, not the size of the data.
 
-### Replaying matching-engine sessions
-
-Recorded sessions replay through the same chart, frame by frame:
+### Replaying recorded sessions — `finchart replay`
 
 ```bash
-scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 \
-  -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap
+finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4
 ```
+
+An interactive player whose clock is the recording's own timestamps. `space`
+pauses, `← →` seek 5 s, `↓ ↑` seek 30 s, `[ ]` change speed (0.25× to 64×),
+`h l` and `k j` pan and zoom, `f` follows the newest candle, `m` toggles the
+heatmap, and `?` lists the keys. Seeking back refolds the session from the start,
+so whatever second you land on shows exactly the chart state at that moment.
+With `--at 1:28`, or when its output is piped, it prints that single frame instead.
 
 <img src="docs/media/sweep.gif" width="100%"
      alt="Terminal replay of a matching-engine session: price flat at 500.00 under a band of red resting ask liquidity, then a single bar with an 11k volume spike, after which the bars climb to about 506 while the heatmap and the depth ladder re-form around the new price.">
@@ -101,7 +107,8 @@ scripts/play-recording.sh web/scenarios/large_buy_sweep.txt --from 112 --to 176 
 **A sweep through a deep book.** For about seventy seconds the market trades
 quietly at 500.00 with roughly 19,000 shares resting per side. Then one
 participant buys 10,000 shares at once. The volume and delta panels spike on a
-single bar, almost all of it buyer-initiated (10,312 of 10,722 shares). The
+single bar, almost all of it buyer-initiated (10,312 of 10,722 shares). Partway
+through, the recording rewinds ten seconds (`← ←`) and plays the sweep again. The
 **heatmap** behind the bars, where red is resting asks and green is resting bids,
 shows the ask band being consumed and the book re-forming higher within seconds.
 The ladder recovers its depth; the price does not come back. Each bar is one
@@ -109,8 +116,7 @@ second, and every layer in a column describes that same second. A second with no
 trades is a flat tick with no volume, not a gap.
 
 ```bash
-scripts/play-recording.sh web/scenarios/liquidity_crisis.txt --from 262 --to 326 \
-  -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap
+finchart replay web/scenarios/liquidity_crisis.txt --start 2:11 --speed 4
 ```
 
 <img src="docs/media/crisis.gif" width="100%"
@@ -129,9 +135,9 @@ The three sessions in `web/scenarios/` (`normal_market`, `large_buy_sweep`,
 matching engine (not included here). Every trade in them was matched among
 simulated participants: market makers, noise traders, a layering "spoofer" and
 large directional orders. They were captured through this repository's gRPC
-adapter. They are simulations, not exchange data. `play-recording.sh` renders
-each frame with the adapter's offline `--replay` of the session up to that
-heartbeat, so every frame is the exact state at that moment of the run.
+adapter. They are simulations, not exchange data. Their candles are one second
+and their tick 0.01, the replay defaults; files written by `finchart record`
+carry their own interval and tick in a `#` header line.
 
 ### Scriptable output
 
@@ -139,18 +145,17 @@ Every view is also available as plain text for files, diffs and CI. Frames are
 byte-identical across runs for the same input:
 
 ```bash
-cargo run --release -p examples-bench -- --snapshot artifacts/tui     # static chart: plain, ANSI, HTML + metrics.json
-cargo run --release -p examples-live  -- --snapshot artifacts/live    # forming candle before / mid / after roll-over
-cargo run --release -p examples-live  -- --record artifacts/feed/events.txt   # write the synthetic event stream
-cargo run --release -p examples-live  -- --replay artifacts/feed/events.txt   # fold it back and print a frame
-cargo run --release -p examples-matching-engine -- --replay web/scenarios/normal_market.txt \
-  --interval-secs 1 --tick-size 0.01 --heatmap                         # final frame of a session (ANSI on a TTY, plain when piped)
+finchart snapshot chart                     # static chart: plain, candles, ANSI, HTML + metrics.json (artifacts/tui)
+finchart snapshot live                      # forming candle before / mid / after roll-over (artifacts/live)
+finchart record artifacts/events.txt        # the seeded synthetic event stream, one event per line
+finchart replay artifacts/events.txt --at 5:00 > frame.txt          # one plain-text frame of it
+finchart replay web/scenarios/normal_market.txt | head -3           # piped: the final frame, plain
 ```
 
-`examples-live --scenario <name> --snapshot <dir>` renders scripted book
-structures (`ask-wall`, `bid-wall`, `ask-wall-pulled`, `bid-wall-pulled`, `sweep`,
-`bid-reload`) to exercise the heatmap and trade-marker layers. The price line in
-those frames is a placeholder, not built from trades. `artifacts/` is gitignored.
+`finchart scenario <name>` renders scripted book structures (`ask-wall`,
+`bid-wall`, `ask-wall-pulled`, `bid-wall-pulled`, `sweep`, `bid-reload`) to exercise
+the heatmap and trade-marker layers. The price line in those frames is a
+placeholder, not built from trades. `artifacts/` is gitignored.
 
 ### Live from a matching engine
 
@@ -160,8 +165,9 @@ cargo run --release -p examples-matching-engine -- --endpoint http://127.0.0.1:5
 ```
 
 This needs a running engine reachable over gRPC; the engine is a separate project.
-The adapter streams fills, polls Level 2 snapshots and draws the live chart.
-`--record` writes the session to a file that the replay commands above can read.
+The adapter is its own binary, so `finchart` never builds the gRPC stack. It
+streams fills, polls Level 2 snapshots and draws the live chart, and `--record`
+writes the session to a file that `finchart replay` plays back.
 For unattended capture, `--headless --duration <secs>` records without drawing
 the chart.
 
@@ -172,13 +178,14 @@ needed; the gRPC adapter's `protoc` is vendored.
 
 ```bash
 git clone https://github.com/chiefmanny/finchart && cd finchart
-cargo build --release
-cargo test                                   # the whole workspace
-cargo run --release -p examples-live         # q to quit
+cargo install --path finchart     # builds `finchart` into ~/.cargo/bin
+finchart live                     # q to quit
+finchart help                     # every command
+cargo test                        # the whole workspace
 ```
 
-The viewers fill the terminal; a window of at least 120×31 is best. Replay frames
-are a fixed 120×30.
+To try it without installing, use `cargo run --release -p finchart -- live` (or any
+other command). The views fill the terminal; 120×31 or larger is best.
 
 ## How it works
 
@@ -231,8 +238,8 @@ are a fixed 120×30.
   a timestamp.
 - **Dependencies stay at the edges.** `market-core`, `render-core` and
   `backend-terminal` use only `std`: the RNG, ANSI and HTML output, and the
-  epoch→UTC formatter are hand-written. `crossterm` lives only in the viewer
-  binaries, `tonic`/`prost`/`tokio` only in the gRPC adapter, `wasm-bindgen` only
+  epoch→UTC formatter are hand-written. `crossterm` lives only in the `finchart`
+  CLI and the gRPC adapter, `tonic`/`prost`/`tokio` only in the adapter, `wasm-bindgen` only
   in `finchart-web`.
 
 Used as a library, the pipeline is a few calls:
@@ -252,15 +259,15 @@ print!("{}", render_chart(&view, &ChartOptions { width: 120, height: 30, ..Defau
 
 ## Performance
 
-`cargo run --release -p examples-bench` generates a series, culls a 200-candle
+`finchart bench` generates a series, culls a 200-candle
 viewport and renders a 120×40 frame, averaging repeated runs. Measured on an
 Apple M4; your numbers will differ, but the pattern should not.
 
 | Candles in series | Generate | Cull | Render | Memory (columns) |
 |---:|---:|---:|---:|---:|
-| 10,000 | 0.10 ms | 15 ns | 6.8 µs | 0.46 MiB |
-| 100,000 | 0.92 ms | 17 ns | 6.2 µs | 4.58 MiB |
-| 1,000,000 | 9.98 ms | 16 ns | 7.4 µs | 45.78 MiB |
+| 10,000 | 0.17 ms | 29 ns | 12.2 µs | 0.61 MiB |
+| 100,000 | 1.73 ms | 29 ns | 11.8 µs | 6.10 MiB |
+| 1,000,000 | 18.4 ms | 29 ns | 13.1 µs | 61.04 MiB |
 
 Culling sets two slice bounds and rendering touches only what is on screen, so
 both stay flat while the series grows 100×. A full frame takes microseconds,
@@ -302,13 +309,10 @@ crates/market-core/        MarketEvent, ChartState, CandleSeries/CandleBuilder, 
                            LiquidityHeatmap, seeded generators, scripted scenarios
 crates/render-core/        Viewport, cull → CulledView, aggregate (LOD), price/time scales
 crates/backend-terminal/   render_chart (plain / ANSI), annotations, HTML export, UTC time axis
-examples-live/             live viewer, snapshots, scenarios, record/replay
-examples-tui/              interactive pan/zoom viewer
-examples-bench/            benchmark table and static snapshots
-examples-matching-engine/  gRPC adapter: engine streams → MarketEvent (+ vendored proto)
+finchart/                  the `finchart` CLI: live, browse, replay, bench, snapshot, scenario, record
+examples-matching-engine/  gRPC adapter (own binary): engine streams → MarketEvent (+ vendored proto)
 finchart-web/              wasm-bindgen wrapper (WasmChart)
 web/                       browser player + recorded sessions in web/scenarios/
-scripts/play-recording.sh  terminal playback of a recorded session
 docs/                      design notes per milestone; docs/media/ holds the demo tapes
 ```
 

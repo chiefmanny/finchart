@@ -12,13 +12,17 @@ Set Theme "GitHub Dark"
 Set TypingSpeed 8ms
 
 Hide
-Type "export PS1='$ ' && cargo build -q --release -p examples-matching-engine && clear" Enter
+Type `export PS1='$ ' PATH="$PWD/target/release:$PATH" && clear` Enter
 Wait /^\$ ?$/
 Show
 
-Type "scripts/play-recording.sh web/scenarios/liquidity_crisis.txt --from 262 --to 326 -- --interval-secs 1 --tick-size 0.01 --window 30 --heatmap"
+Type "finchart replay web/scenarios/liquidity_crisis.txt --start 2:11 --speed 4"
 Sleep 600ms
 Enter
-Sleep 6.8s
+Sleep 8s
+Space
+Sleep 1.5s
 Screenshot docs/media/crisis.raw.png
-Sleep 2.5s
+Sleep 500ms
+Hide
+Type "q"
