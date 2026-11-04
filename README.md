@@ -79,7 +79,7 @@ microseconds. On the right is a six-level **Level 2 ladder**.
 ### Navigating history — `finchart browse`
 
 ```bash
-finchart browse          # h/l or ←/→ pan · k/j or +/- zoom · r reset · q quit
+finchart browse          # h/l or ←/→ pan · k/j or +/- zoom · c crosshair · r reset · q quit
 ```
 
 A 5,000-candle deterministic series in a pan-and-zoom viewer. Watch the status
@@ -97,9 +97,10 @@ finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4
 An interactive player whose clock is the recording's own timestamps. `space`
 pauses, `← →` seek 5 s, `↓ ↑` seek 30 s, `[ ]` change speed (0.25× to 64×),
 `h l` and `k j` pan and zoom, `f` follows the newest candle, `m` toggles the
-heatmap, and `?` lists the keys. Seeking back refolds the session from the start,
-so whatever second you land on shows exactly the chart state at that moment.
-With `--at 1:28`, or when its output is piped, it prints that single frame instead.
+heatmap, `c` shows a [crosshair](#reading-a-bar--the-crosshair), and `?` lists
+the keys. Seeking back refolds the session from the start, so whatever second you
+land on shows exactly the chart state at that moment. With `--at 1:28`, or when
+its output is piped, it prints that single frame instead.
 
 <img src="docs/media/sweep.gif" width="100%"
      alt="Terminal replay of a matching-engine session: price flat at 500.00 under a band of red resting ask liquidity, then a single bar with an 11k volume spike, after which the bars climb to about 506 while the heatmap and the depth ladder re-form around the new price.">
@@ -138,6 +139,26 @@ large directional orders. They were captured through this repository's gRPC
 adapter. They are simulations, not exchange data. Their candles are one second
 and their tick 0.01, the replay defaults; files written by `finchart record`
 carry their own interval and tick in a `#` header line.
+
+### Reading a bar — the crosshair
+
+```bash
+finchart replay web/scenarios/large_buy_sweep.txt --start 1:12 --paused   # then c, and , . to step
+```
+
+<img src="docs/media/crosshair.gif" width="100%"
+     alt="The paused sweep replay with a dashed crosshair rule. The status line becomes a readout: 09-22 19:06:48, open 499.99, high 500.54, low 499.99, close 500.23, volume 10.7k, delta +9.9k. Stepping back moves the rule across earlier seconds, including a quiet second whose readout shows zero volume.">
+
+In `browse` and `replay`, `c` drops a crosshair on the newest bar and `,` / `.`
+step it a bar at a time. The status line becomes a readout of the bar under it:
+its time to the second, OHLC, volume and delta. Above, it lands on the sweep
+(10.7k shares, +9.9k delta), then walks back through the quiet seconds before it,
+which read out as flat bars with no volume.
+
+The mouse works too: hovering moves the crosshair and adds a price rule, the
+price under the pointer and, with the heatmap on, the average resting bid and ask
+liquidity in that cell. The wheel zooms and dragging pans. `Esc` hides the
+crosshair before it quits.
 
 ### Scriptable output
 
@@ -329,7 +350,7 @@ existing charting engines.
 
 ```bash
 brew install vhs            # or see https://github.com/charmbracelet/vhs; also needs ffmpeg
-docs/media/render.sh        # all four, or one of: live tui sweep crisis
+docs/media/render.sh        # all five, or one of: live tui sweep crisis crosshair
 ```
 
 Each `docs/media/<name>.tape` is the script for one recording. `render.sh` builds

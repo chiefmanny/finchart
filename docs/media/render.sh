@@ -2,7 +2,7 @@
 # Re-record the README demos from their VHS tapes, then optimize them for the web.
 #
 #   docs/media/render.sh            # all demos
-#   docs/media/render.sh sweep      # one demo: live | tui | sweep | crisis
+#   docs/media/render.sh sweep      # one demo: live | tui | sweep | crisis | crosshair
 #
 # Needs vhs (https://github.com/charmbracelet/vhs) and ffmpeg. Each tape writes a
 # raw capture (<name>.raw.gif / .raw.png); this script re-encodes it to a 10 fps,
@@ -15,7 +15,7 @@ cd "$root"
 # Build first so no tape waits on a compile.
 cargo build --quiet --release -p finchart
 
-for name in "${@:-live tui sweep crisis}"; do
+for name in "${@:-live tui sweep crisis crosshair}"; do
   for demo in $name; do
     tape="docs/media/$demo.tape"
     [[ -f $tape ]] || { echo "no such tape: $tape" >&2; exit 1; }

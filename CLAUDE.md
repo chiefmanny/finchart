@@ -43,6 +43,7 @@ finchart help                           # list commands; `finchart help <cmd>` f
 finchart live                           # live synthetic replay (follows the forming candle; --fps N)
 finchart browse                         # interactive viewer over 5,000 candles (pan/zoom/reset/quit)
 finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4   # interactive player (space ←→ ↓↑ [] hjkl f m ?)
+finchart replay FILE --start 1:12 --paused   # open paused (c: crosshair, , .: step a bar)
 finchart replay FILE --at 1:28          # print one frame (also when piped: plain text, final frame)
 finchart snapshot live artifacts/live   # deterministic before/mid/after frames
 FINCHART_BLESS=1 cargo test -p finchart golden   # re-bless golden fixtures after an intended visual change (then review git diff)
@@ -94,7 +95,12 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   delta + ladder). `player::Player` is the `replay` core: a clock over the
   recording's own timestamps that folds events up to it (seeking back refolds
   from the start, so any second shows the exact state then), mpv-style keys,
-  pan/zoom/follow; terminal-free and tested. Settings resolve flags > the file's
+  pan/zoom/follow; terminal-free and tested. `pointer::Pointer` is the shared
+  crosshair + mouse state for `browse`/`replay` (`c` toggle, `,`/`.` step a bar,
+  `Esc` hides it before quitting; hover = crosshair, wheel = zoom, drag = pan, with
+  fractional drag accumulation); it maps events using `backend_terminal::layout`,
+  and `Screen::enter_with_mouse` turns on mouse capture (`live` stays without it,
+  since motion would wake its timed loop). Settings resolve flags > the file's
   `#` header > defaults (1 s, 0.01 — the engine recordings). The gRPC adapter
   stays a separate binary so `finchart` never builds tonic/tokio.
 - **Columnar hot path.** Candles are stored as parallel `Vec`s (one per OHLCV
@@ -237,6 +243,13 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
 - **`render_chart` is the single rendering API** (the old `render`/`render_with`
   were removed in V2). It's pure (returns a `String`) and composes a status line,
   price gutter, OHLC/candle plot, optional volume panel, and a UTC time axis.
+  `ChartOptions.crosshair` (`Crosshair { col, row }`, screen cells) snaps to the bar
+  under `col`, draws `┆` (and `┄` + a gutter price when `row` is in the price plot)
+  and replaces the status line with a readout (time to the second, OHLC, volume,
+  delta, `@ price`, heatmap bid/ask liquidity at that cell). `layout(view, opts)`
+  exposes the same geometry (`plot_left/cols/top/rows`, `cell`, `bar_centers`,
+  `price_at`, `row_of`) that `render_chart` and `rendered_bar_count` use (one
+  private `Geometry`, so callers never disagree with the renderer).
   `ChartOptions.annotations` (`Annotation { ts, label }`) draws a dotted rule + label
   at the bar containing `ts` (ANSI 33; skipped when outside the visible candles);
   the terminal binaries pass none.
@@ -298,7 +311,8 @@ See `docs/verification.md` for the full workflow and acceptance criteria.
   byte for byte against `finchart/tests/golden/`: everything `finchart snapshot
   chart|live` and `finchart scenario <all six>` write (except the timing-bearing
   `metrics.json`; the tests call the same writers), plus `finchart replay` frames
-  of the engine recordings at fixed moments. A visual change fails CI with the
+  of the engine recordings at fixed moments (including crosshair readouts by key
+  and by mouse hover). A visual change fails CI with the
   first differing line per file. When a change is intended, re-bless and review:
   `FINCHART_BLESS=1 cargo test -p finchart golden && git diff finchart/tests/golden`.
   `.gitattributes` keeps the fixtures' bytes exact (`-text`).
