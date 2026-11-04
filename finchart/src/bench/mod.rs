@@ -17,11 +17,6 @@ const VISIBLE: usize = 200;
 const RENDER_W: usize = 120;
 const RENDER_H: usize = 40;
 
-/// Bytes one candle occupies in the columnar store: one `i64` + five `f64`.
-const fn bytes_per_candle() -> usize {
-    std::mem::size_of::<i64>() + 5 * std::mem::size_of::<f64>()
-}
-
 /// Deterministic series used for the on-screen demo.
 fn demo_series() -> CandleSeries {
     generate(&GenConfig {
@@ -133,7 +128,7 @@ fn bench_one(size: usize, gen_reps: usize, hot_reps: usize) -> BenchResult {
     BenchResult {
         size,
         visible: view.len(),
-        bytes: size * bytes_per_candle(),
+        bytes: series.column_bytes(),
         gen: gen_total / gen_reps.max(1) as u32,
         cull: cull_total / hot_reps.max(1) as u32,
         render: render_total / hot_reps.max(1) as u32,
@@ -213,7 +208,7 @@ mod tests {
         let r = bench_one(1_000, 1, 1);
         assert_eq!(r.size, 1_000);
         assert_eq!(r.visible, 200);
-        assert_eq!(r.bytes, 1_000 * (8 + 5 * 8));
+        assert_eq!(r.bytes, 1_000 * (8 + 7 * 8)); // ts + OHLC, volume, buy, sell
     }
 
     #[test]

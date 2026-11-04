@@ -136,6 +136,27 @@ impl CandleSeries {
         })
     }
 
+    /// Bytes held by the columns' elements (excluding spare `Vec` capacity). Every
+    /// field is destructured, so adding a column without counting it fails to build.
+    pub fn column_bytes(&self) -> usize {
+        use std::mem::size_of_val;
+        let Self {
+            ts,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            buy_volume,
+            sell_volume,
+        } = self;
+        size_of_val(ts.as_slice())
+            + [open, high, low, close, volume, buy_volume, sell_volume]
+                .iter()
+                .map(|c| size_of_val(c.as_slice()))
+                .sum::<usize>()
+    }
+
     /// Zero-copy borrow of the timestamp column.
     pub fn ts(&self) -> &[i64] {
         &self.ts
@@ -168,6 +189,17 @@ impl CandleSeries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_bytes_counts_every_column() {
+        let mut s = CandleSeries::new();
+        assert_eq!(s.column_bytes(), 0);
+        for ts in 0..3 {
+            s.push(sample(ts));
+        }
+        // One i64 timestamp + seven f64 columns (OHLC, volume, buy, sell) per candle.
+        assert_eq!(s.column_bytes(), 3 * (8 + 7 * 8));
+    }
 
     fn sample(ts: i64) -> Candle {
         Candle {

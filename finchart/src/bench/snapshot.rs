@@ -137,7 +137,7 @@ pub(crate) fn measure() -> Metrics {
         generation,
         culling,
         render,
-        memory_bytes: DATASET_SIZE * (std::mem::size_of::<i64>() + 5 * std::mem::size_of::<f64>()),
+        memory_bytes: snapshot_series().column_bytes(),
     }
 }
 
@@ -307,6 +307,6 @@ mod tests {
         assert_eq!(m.dataset_size, DATASET_SIZE);
         assert_eq!(m.chart_width, CHART_WIDTH);
         assert_eq!(m.chart_height, CHART_HEIGHT);
-        assert_eq!(m.memory_bytes, DATASET_SIZE * (8 + 5 * 8));
+        assert_eq!(m.memory_bytes, DATASET_SIZE * (8 + 7 * 8));
     }
 }
