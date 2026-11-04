@@ -261,20 +261,7 @@ impl Replay {
     /// A render-ready side-aware heatmap view over the visible price band.
     pub fn heatmap_view(&self) -> HeatmapView {
         let (lo, hi) = self.visible_price_extent().unwrap_or((0.0, 1.0));
-        let columns = self
-            .heatmap()
-            .columns_in_range_sided(lo, hi)
-            .into_iter()
-            .map(|col| {
-                col.into_iter()
-                    .map(|(p, l, side)| (p, l, side == BookSide::Bid))
-                    .collect()
-            })
-            .collect();
-        HeatmapView {
-            columns,
-            max_liquidity: self.max_liquidity(),
-        }
+        HeatmapView::from_heatmap(self.heatmap(), lo, hi)
     }
 
     /// A render-ready depth view: top-`depth_panel_levels` bids/asks + spread.
@@ -377,7 +364,8 @@ mod tests {
     fn advancing_ticks_builds_new_candles() {
         let mut r = Replay::new(&cfg());
         let before = r.series_len();
-        assert!(r.current().is_none()); // no forming candle before first tick
+        // The seeding heartbeat opened the first live interval: flat, no volume yet.
+        assert_eq!(r.current().map(|c| c.volume), Some(0.0));
         r.advance(cfg().ticks_per_candle * 3 + 5);
         assert!(r.series_len() > before, "expected new candles");
         assert!(r.current().is_some(), "expected a forming candle");
@@ -400,11 +388,13 @@ mod tests {
     }
 
     #[test]
-    fn current_flow_appears_after_first_tick() {
+    fn current_flow_accumulates_from_the_first_tick() {
         let mut r = Replay::new(&cfg());
-        assert!(r.current_flow().is_none());
+        let f = r.current_flow().expect("seeding heartbeat opened a candle");
+        assert_eq!(f.buy_volume + f.sell_volume, 0.0);
         r.advance(50);
-        assert!(r.current_flow().is_some());
+        let f = r.current_flow().unwrap();
+        assert!(f.buy_volume + f.sell_volume > 0.0);
     }
 
     #[test]

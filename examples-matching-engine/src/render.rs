@@ -37,21 +37,9 @@ pub fn render_state(
     let (lo, hi) = view.price_extent().unwrap_or((0.0, 1.0));
 
     let heatmap = if cfg.show_heatmap {
-        state.heatmap().map(|h| {
-            let columns = h
-                .columns_in_range_sided(lo, hi)
-                .into_iter()
-                .map(|col| {
-                    col.into_iter()
-                        .map(|(p, l, side)| (p, l, side == BookSide::Bid))
-                        .collect()
-                })
-                .collect();
-            HeatmapView {
-                columns,
-                max_liquidity: h.max_liquidity(),
-            }
-        })
+        state
+            .heatmap()
+            .map(|h| HeatmapView::from_heatmap(h, lo, hi))
     } else {
         None
     };

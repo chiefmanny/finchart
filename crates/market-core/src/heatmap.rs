@@ -99,13 +99,20 @@ impl LiquidityHeatmap {
     pub fn columns_in_range(&self, min: f64, max: f64) -> Vec<Vec<(f64, f64)>> {
         self.columns_in_range_sided(min, max)
             .into_iter()
-            .map(|col| col.into_iter().map(|(p, l, _)| (p, l)).collect())
+            .map(|(_, col)| col.into_iter().map(|(p, l, _)| (p, l)).collect())
             .collect()
     }
 
-    /// Side-aware render export: per column, the `(price, liquidity, side)` levels
-    /// within `[min, max]`, price-sorted (bids and asks interleaved by price).
-    pub fn columns_in_range_sided(&self, min: f64, max: f64) -> Vec<Vec<(f64, f64, BookSide)>> {
+    /// Side-aware render export: per column (oldest → newest), its recording time
+    /// and the `(price, liquidity, side)` levels within `[min, max]`, price-sorted
+    /// (bids and asks interleaved by price). The timestamp lets a renderer place
+    /// each column under the candle whose interval contains it.
+    #[allow(clippy::type_complexity)]
+    pub fn columns_in_range_sided(
+        &self,
+        min: f64,
+        max: f64,
+    ) -> Vec<(i64, Vec<(f64, f64, BookSide)>)> {
         let (lo, hi) = self.tick_range(min, max);
         self.columns
             .iter()
@@ -117,10 +124,11 @@ impl LiquidityHeatmap {
                     .chain(c.ask.range(lo..=hi).map(|(&t, &l)| (t, l, BookSide::Ask)))
                     .collect();
                 cells.sort_by_key(|(t, _, _)| *t);
-                cells
+                let cells = cells
                     .into_iter()
                     .map(|(t, l, s)| (t as f64 * self.tick_size, l, s))
-                    .collect()
+                    .collect();
+                (c.ts, cells)
             })
             .collect()
     }
@@ -215,12 +223,25 @@ mod tests {
     }
 
     #[test]
+    fn columns_in_range_sided_keeps_each_columns_timestamp() {
+        let mut h = LiquidityHeatmap::new(0.05, 8);
+        h.record(&book(), 1);
+        h.record(&book(), 5);
+        let ts: Vec<i64> = h
+            .columns_in_range_sided(99.0, 101.0)
+            .iter()
+            .map(|(ts, _)| *ts)
+            .collect();
+        assert_eq!(ts, vec![1, 5]);
+    }
+
+    #[test]
     fn columns_in_range_sided_tags_each_cell_with_its_side() {
         let mut h = LiquidityHeatmap::new(0.05, 8);
         h.record(&book(), 1);
         let cols = h.columns_in_range_sided(99.0, 101.0);
         assert_eq!(cols.len(), 1);
-        let cells = &cols[0];
+        let cells = &cols[0].1;
         assert_eq!(cells.len(), 6);
 
         let bids: Vec<f64> = cells

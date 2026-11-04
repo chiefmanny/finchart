@@ -207,21 +207,10 @@ impl WasmChart {
         let view = cull(series, &self.effective_viewport(series.len()));
         let (lo, hi) = view.price_extent().unwrap_or((0.0, 1.0));
 
-        let heatmap = self.state.heatmap().map(|h| {
-            let columns = h
-                .columns_in_range_sided(lo, hi)
-                .into_iter()
-                .map(|col| {
-                    col.into_iter()
-                        .map(|(p, l, side)| (p, l, side == BookSide::Bid))
-                        .collect()
-                })
-                .collect();
-            HeatmapView {
-                columns,
-                max_liquidity: h.max_liquidity(),
-            }
-        });
+        let heatmap = self
+            .state
+            .heatmap()
+            .map(|h| HeatmapView::from_heatmap(h, lo, hi));
 
         let to_tuples = |side| {
             self.state

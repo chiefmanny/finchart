@@ -18,7 +18,7 @@ pub use candle::{Candle, CandleSeries};
 pub use depth::{BestBidAsk, BookSide, DepthLevel, DepthSnapshot, DepthUpdate, OrderBook};
 pub use event::{parse_event, parse_events, serialize_event, serialize_events, MarketEvent};
 pub use heatmap::LiquidityHeatmap;
-pub use live::{CandleBuilder, CandleUpdate, Flow, Side, Tick};
+pub use live::{CandleBuilder, CandleUpdate, Flow, Side, Tick, MAX_GAP_FILL};
 pub use scenario::{scenario, ScenarioConfig, ScenarioKind, ScenarioStep};
 pub use state::{replay_events, ApplyResult, ChartState};
 pub use synth::{

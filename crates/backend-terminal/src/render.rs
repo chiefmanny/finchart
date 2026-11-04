@@ -3,6 +3,7 @@
 
 use crate::grid::{CellColor, Grid};
 use crate::timefmt::format_utc;
+use market_core::{BookSide, LiquidityHeatmap};
 use render_core::{aggregate, Bar, CulledView, PriceScale};
 
 /// Open/close tick glyphs for the OHLC bar style.
@@ -127,22 +128,47 @@ pub struct DepthPanel {
     pub spread: Option<f64>,
 }
 
-/// A render-ready, side-aware liquidity heatmap: `columns` oldest→newest, each a
-/// list of `(price, liquidity, is_bid)` cells. `max_liquidity` is kept for
-/// reference; the renderer computes its own per-row scale. Decoupled (plain
-/// tuples) from the heatmap store.
+/// One heatmap column: its recording time and `(price, liquidity, is_bid)` cells.
+pub type HeatmapColumn = (i64, Vec<(f64, f64, bool)>);
+
+/// A render-ready, side-aware liquidity heatmap: `columns` oldest→newest, each its
+/// recording time plus a list of `(price, liquidity, is_bid)` cells. Each column is
+/// drawn under the bar whose time span contains it. `max_liquidity` is kept for
+/// reference; the renderer computes its own scale. Decoupled (plain tuples) from
+/// the heatmap store; [`HeatmapView::from_heatmap`] converts one.
 #[derive(Debug, Clone, Default)]
 pub struct HeatmapView {
-    pub columns: Vec<Vec<(f64, f64, bool)>>,
+    pub columns: Vec<HeatmapColumn>,
     pub max_liquidity: f64,
 }
 
-/// One executed-trade marker: `col_from_right` is how many columns back from the
-/// newest (0 = latest); `buy` selects the glyph/color.
+impl HeatmapView {
+    /// Export the columns of `heatmap` within the price band `[min, max]`.
+    pub fn from_heatmap(heatmap: &LiquidityHeatmap, min: f64, max: f64) -> Self {
+        let columns = heatmap
+            .columns_in_range_sided(min, max)
+            .into_iter()
+            .map(|(ts, cells)| {
+                let cells = cells
+                    .into_iter()
+                    .map(|(p, l, side)| (p, l, side == BookSide::Bid))
+                    .collect();
+                (ts, cells)
+            })
+            .collect();
+        Self {
+            columns,
+            max_liquidity: heatmap.max_liquidity(),
+        }
+    }
+}
+
+/// One executed-trade marker, drawn at its price in the bar whose time span
+/// contains `ts`; `buy` selects the glyph/color.
 #[derive(Debug, Clone, Copy)]
 pub struct TradeMarker {
     pub price: f64,
-    pub col_from_right: usize,
+    pub ts: i64,
     pub buy: bool,
 }
 
@@ -270,22 +296,24 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
     let ps = PriceScale::new(price_min, price_max, plot_rows);
     let mut grid = Grid::new(w, h);
 
+    // Overlays are placed in time: each lands in the bar whose span contains it.
+    let span = BarSpans::new(view, &bars, gutter, cell, plot_cols);
+
     // Background layer: liquidity heatmap drawn before the bars so candles sit on top.
     if let Some(heatmap) = &opts.heatmap {
-        draw_heatmap(
-            &mut grid, heatmap, gutter, plot_cols, plot_top, plot_rows, &ps,
-        );
+        draw_heatmap(&mut grid, heatmap, &span, plot_top, plot_rows, &ps);
     }
-    // Trade markers: above the heatmap, below the candles (bars overwrite on overlap).
-    if let Some(trades) = &opts.trades {
-        draw_trade_markers(
-            &mut grid, trades, gutter, plot_cols, plot_top, plot_rows, &ps,
-        );
+    // Trade markers sit in a bar's right-hand column. A trade's price lies inside
+    // its own bar, so with multi-column bars the markers go on top (that column only
+    // holds the close tick); a one-column bar would be covered, so they go under it.
+    let markers_on_top = cell > 1;
+    if let (Some(trades), false) = (&opts.trades, markers_on_top) {
+        draw_trade_markers(&mut grid, trades, &span, plot_top, plot_rows, &ps);
     }
 
     // Annotation rules go under the bars, so a bar keeps its own cells and the rule
     // shows above and below it; the labels go on top once the bars are drawn.
-    let marks = annotation_columns(view, &bars, &opts.annotations, gutter, cell);
+    let marks = annotation_columns(&span, &opts.annotations);
     for &(col, _) in &marks {
         for r in plot_top..plot_top + plot_rows {
             grid.set_styled(col, r, '┊', CellColor::Note);
@@ -299,6 +327,10 @@ pub fn render_chart(view: &CulledView, opts: &ChartOptions) -> String {
             Style::OhlcBars => draw_ohlc_bar(&mut grid, bar, base, plot_top, &ps),
             Style::Candles => draw_candle_bar(&mut grid, bar, base, plot_top, &ps),
         }
+    }
+
+    if let (Some(trades), true) = (&opts.trades, markers_on_top) {
+        draw_trade_markers(&mut grid, trades, &span, plot_top, plot_rows, &ps);
     }
 
     draw_annotation_labels(&mut grid, &marks, gutter, chart_width, plot_top, plot_rows);
@@ -512,78 +544,142 @@ fn heat_glyph(frac: f64) -> Option<char> {
     Some(HEAT_RAMP[idx - 1])
 }
 
-/// Draw the side-aware liquidity heatmap as a background layer. Columns map
-/// newest→rightmost (follow-latest); each cell's liquidity accumulates into its
-/// price row per side, intensity is scaled by the **max rendered row total** (so
-/// cells span the ramp rather than saturate), and the dominant side colors it
-/// (green = bid, red = ask).
+/// Where each bar sits in time and on screen. Bar `i` spans
+/// `[bars[i].start_ts, bars[i + 1].start_ts)`; the last bar ends one candle
+/// interval after the last visible candle (inferred from the candle spacing, so a
+/// one-candle view is open-ended). Overlays outside every span are not drawn:
+/// before the view they have scrolled away, after it they have not happened yet.
+struct BarSpans<'a> {
+    starts: Vec<i64>,
+    end: Option<i64>,
+    bars: &'a [Bar],
+    gutter: usize,
+    cell: usize,
+    plot_cols: usize,
+}
+
+impl<'a> BarSpans<'a> {
+    fn new(
+        view: &CulledView,
+        bars: &'a [Bar],
+        gutter: usize,
+        cell: usize,
+        plot_cols: usize,
+    ) -> Self {
+        let n = view.ts.len();
+        let end = (n >= 2).then(|| view.ts[n - 1] + (view.ts[n - 1] - view.ts[n - 2]));
+        Self {
+            starts: bars.iter().map(|b| b.start_ts).collect(),
+            end,
+            bars,
+            gutter,
+            cell,
+            plot_cols,
+        }
+    }
+
+    /// Index of the bar whose span contains `ts`.
+    fn bar_at(&self, ts: i64) -> Option<usize> {
+        let first = *self.starts.first()?;
+        if ts < first || self.end.is_some_and(|end| ts >= end) {
+            return None;
+        }
+        Some(self.starts.partition_point(|&s| s <= ts) - 1)
+    }
+
+    /// Screen column of offset `k` within bar `i`'s cell, if it fits the plot.
+    fn col(&self, i: usize, k: usize) -> Option<usize> {
+        let x = i * self.cell + k;
+        (x < self.plot_cols).then_some(self.gutter + x)
+    }
+}
+
+/// Draw the side-aware liquidity heatmap as a background layer. Each column goes
+/// to the bar whose time span contains it, and fills that bar's whole cell; when
+/// several columns share a bar, their liquidity is averaged per price row.
+/// Intensity is scaled by the **max rendered row total** (so cells span the ramp
+/// rather than saturate), and the dominant side colors it (green = bid, red = ask).
 fn draw_heatmap(
     grid: &mut Grid,
     heatmap: &HeatmapView,
-    gutter: usize,
-    plot_cols: usize,
+    span: &BarSpans,
     plot_top: usize,
     plot_rows: usize,
     ps: &PriceScale,
 ) {
-    if heatmap.columns.is_empty() || plot_rows == 0 {
+    let nbars = span.bars.len();
+    if heatmap.columns.is_empty() || plot_rows == 0 || nbars == 0 {
         return;
     }
-    let ncols = heatmap.columns.len() as isize;
 
-    // Pass 1: accumulate per (column, row) bid/ask liquidity and the global max total.
-    let mut cells = vec![[0.0f64; 2]; plot_cols * plot_rows]; // [bid, ask]
-    let mut max_total = 0.0_f64;
-    for c in 0..plot_cols {
-        let hi = c as isize + ncols - plot_cols as isize;
-        if hi < 0 {
+    // Pass 1: accumulate per (bar, row) bid/ask liquidity and columns per bar.
+    let mut cells = vec![[0.0f64; 2]; nbars * plot_rows]; // [bid, ask]
+    let mut columns = vec![0usize; nbars];
+    for (ts, levels) in &heatmap.columns {
+        let Some(i) = span.bar_at(*ts) else {
             continue;
-        }
-        for &(price, liq, is_bid) in &heatmap.columns[hi as usize] {
+        };
+        columns[i] += 1;
+        for &(price, liq, is_bid) in levels {
             let r = ps.price_to_row(price);
             if r >= 0 && (r as usize) < plot_rows {
-                let cell = &mut cells[c * plot_rows + r as usize];
-                cell[usize::from(!is_bid)] += liq;
-                max_total = max_total.max(cell[0] + cell[1]);
+                cells[i * plot_rows + r as usize][usize::from(!is_bid)] += liq;
             }
+        }
+    }
+
+    // Average over each bar's columns, tracking the largest rendered total.
+    let mut max_total = 0.0_f64;
+    for (i, &n) in columns.iter().enumerate() {
+        if n == 0 {
+            continue;
+        }
+        for cell in &mut cells[i * plot_rows..(i + 1) * plot_rows] {
+            cell[0] /= n as f64;
+            cell[1] /= n as f64;
+            max_total = max_total.max(cell[0] + cell[1]);
         }
     }
     if max_total <= 0.0 {
         return;
     }
 
-    // Pass 2: render glyph by intensity, color by dominant side.
-    for c in 0..plot_cols {
+    // Pass 2: render glyph by intensity, color by dominant side, across the cell.
+    for i in 0..nbars {
         for r in 0..plot_rows {
-            let [bid, ask] = cells[c * plot_rows + r];
-            if let Some(glyph) = heat_glyph((bid + ask) / max_total) {
-                let color = if bid >= ask {
-                    CellColor::Green
-                } else {
-                    CellColor::Red
-                };
-                grid.set_styled(gutter + c, plot_top + r, glyph, color);
+            let [bid, ask] = cells[i * plot_rows + r];
+            let Some(glyph) = heat_glyph((bid + ask) / max_total) else {
+                continue;
+            };
+            let color = if bid >= ask {
+                CellColor::Green
+            } else {
+                CellColor::Red
+            };
+            for k in 0..span.cell {
+                if let Some(col) = span.col(i, k) {
+                    grid.set_styled(col, plot_top + r, glyph, color);
+                }
             }
         }
     }
 }
 
-/// Draw executed-trade markers above the heatmap: `▲` buy (green) / `▼` sell (red),
-/// placed at the trade's price row and its column (newest = rightmost).
+/// Draw executed-trade markers: `▲` buy (green) / `▼` sell (red), at the trade's
+/// price row in the right-hand column of the bar containing it (the OHLC close-tick
+/// column, clear of the bar's high-low line).
 fn draw_trade_markers(
     grid: &mut Grid,
     trades: &TradeMarkers,
-    gutter: usize,
-    plot_cols: usize,
+    span: &BarSpans,
     plot_top: usize,
     plot_rows: usize,
     ps: &PriceScale,
 ) {
     for m in &trades.markers {
-        if m.col_from_right >= plot_cols {
+        let Some(col) = span.bar_at(m.ts).and_then(|i| span.col(i, span.cell - 1)) else {
             continue;
-        }
-        let col = gutter + (plot_cols - 1 - m.col_from_right);
+        };
         let r = ps.price_to_row(m.price);
         if r >= 0 && (r as usize) < plot_rows {
             let (glyph, color) = if m.buy {
@@ -693,22 +789,12 @@ fn put_label(grid: &mut Grid, gutter: usize, row: usize, lbl: &str) {
 
 /// Resolve each visible annotation to the plot column of the bar containing it:
 /// the middle of that bar's cell, which for OHLC bars is its high-low line.
-fn annotation_columns<'a>(
-    view: &CulledView,
-    bars: &[Bar],
-    annotations: &'a [Annotation],
-    gutter: usize,
-    cell: usize,
-) -> Vec<(usize, &'a str)> {
-    let (Some(first), Some(&last_ts)) = (bars.first(), view.ts.last()) else {
-        return Vec::new();
-    };
+fn annotation_columns<'a>(span: &BarSpans, annotations: &'a [Annotation]) -> Vec<(usize, &'a str)> {
     annotations
         .iter()
-        .filter(|a| a.ts >= first.start_ts && a.ts <= last_ts)
-        .map(|a| {
-            let i = bars.partition_point(|b| b.start_ts <= a.ts) - 1;
-            (gutter + i * cell + cell / 2, a.label.as_str())
+        .filter_map(|a| {
+            let col = span.bar_at(a.ts).and_then(|i| span.col(i, span.cell / 2))?;
+            Some((col, a.label.as_str()))
         })
         .collect()
 }
@@ -1234,14 +1320,17 @@ mod tests {
         let (lo, hi) = view.price_extent().unwrap();
         let rows = 30usize;
         let split = (lo + hi) / 2.0;
-        let columns: Vec<Vec<(f64, f64, bool)>> = (0..130)
-            .map(|_| {
-                (0..rows)
+        let columns = view
+            .ts
+            .iter()
+            .map(|&ts| {
+                let cells = (0..rows)
                     .map(|k| {
                         let price = lo + (hi - lo) * k as f64 / (rows as f64 - 1.0);
                         (price, k as f64 + 1.0, price < split)
                     })
-                    .collect()
+                    .collect();
+                (ts, cells)
             })
             .collect();
         HeatmapView {
@@ -1296,12 +1385,12 @@ mod tests {
             markers: vec![
                 TradeMarker {
                     price: (lo + hi) / 2.0,
-                    col_from_right: 0,
+                    ts: view.ts[view.len() - 1],
                     buy: true,
                 },
                 TradeMarker {
                     price: (lo + hi) / 2.0,
-                    col_from_right: 5,
+                    ts: view.ts[view.len() - 6],
                     buy: false,
                 },
             ],
@@ -1353,5 +1442,151 @@ mod tests {
         // Both layers present: heatmap background glyph and candle wick on top.
         assert!(out.contains('▓'), "expected heatmap background");
         assert!(out.contains('│'), "expected candle bars over the heatmap");
+    }
+
+    // --- time alignment: overlays sit under the bar containing their time ------
+
+    /// Four 60 s candles at ts 0, 60, 120, 180 sitting near 99, plus a tall last
+    /// candle so prices up to 102 are on the scale. Rows around 100.5 stay clear of
+    /// bars 0..=2, so overlay cells there are not overwritten.
+    fn quad() -> CandleSeries {
+        let mut s = CandleSeries::new();
+        for (i, high) in [99.2, 99.2, 99.2, 102.0].into_iter().enumerate() {
+            s.push(market_core::Candle {
+                ts: i as i64 * 60,
+                open: 99.0,
+                high,
+                low: 99.0,
+                close: 99.0,
+                volume: 1.0,
+            });
+        }
+        s
+    }
+
+    fn quad_chart(heat: Vec<HeatmapColumn>, trades: Vec<TradeMarker>) -> String {
+        let s = quad();
+        let view = cull(&s, &Viewport::full(s.len()));
+        let mut o = opts(60, 14, Style::OhlcBars);
+        o.heatmap = Some(HeatmapView {
+            columns: heat,
+            max_liquidity: 10.0,
+        });
+        o.trades = Some(TradeMarkers { markers: trades });
+        render_chart(&view, &o)
+    }
+
+    /// `(row, col, glyph)` of every heatmap glyph inside the price plot.
+    fn heat_cells(out: &str) -> Vec<(usize, usize, char)> {
+        let lines: Vec<&str> = out.lines().collect();
+        let mut cells = Vec::new();
+        for (r, line) in lines.iter().enumerate().take(lines.len() - 1).skip(1) {
+            for (c, ch) in line.chars().enumerate() {
+                if HEAT_RAMP.contains(&ch) {
+                    cells.push((r, c, ch));
+                }
+            }
+        }
+        cells
+    }
+
+    fn cols_of(cells: &[(usize, usize, char)]) -> Vec<usize> {
+        let mut cols: Vec<usize> = cells.iter().map(|&(_, c, _)| c).collect();
+        cols.sort_unstable();
+        cols.dedup();
+        cols
+    }
+
+    fn heat_at(ts: i64, liq: f64) -> HeatmapColumn {
+        (ts, vec![(100.5, liq, true)])
+    }
+
+    #[test]
+    fn a_heatmap_column_fills_the_bar_that_contains_its_time() {
+        let in_bar_1 = cols_of(&heat_cells(&quad_chart(vec![heat_at(70, 10.0)], vec![])));
+        let in_bar_2 = cols_of(&heat_cells(&quad_chart(vec![heat_at(130, 10.0)], vec![])));
+        let cell = Style::OhlcBars.cell_width();
+        assert_eq!(in_bar_1.len(), cell, "should span the whole bar cell");
+        let shifted: Vec<usize> = in_bar_1.iter().map(|c| c + cell).collect();
+        assert_eq!(
+            in_bar_2, shifted,
+            "one bar later in time = one cell to the right"
+        );
+    }
+
+    #[test]
+    fn heatmap_columns_outside_the_visible_candles_are_dropped() {
+        // Before the first candle, and after the last candle's interval (180 + 60).
+        let out = quad_chart(vec![heat_at(-10, 10.0), heat_at(240, 10.0)], vec![]);
+        assert!(heat_cells(&out).is_empty(), "unexpected heat:\n{out}");
+        // Inside the last candle's interval, after its open, still counts.
+        let out = quad_chart(vec![heat_at(200, 10.0)], vec![]);
+        assert!(!heat_cells(&out).is_empty(), "missing heat:\n{out}");
+    }
+
+    #[test]
+    fn heatmap_columns_sharing_a_bar_are_averaged() {
+        // Bar 1 holds 10 then nothing (average 5); bar 2 holds 10.
+        let out = quad_chart(
+            vec![
+                (60, vec![(100.5, 10.0, true)]),
+                (90, vec![]),
+                heat_at(120, 10.0),
+            ],
+            vec![],
+        );
+        let cells = heat_cells(&out);
+        let cell = Style::OhlcBars.cell_width();
+        let cols = cols_of(&cells);
+        assert_eq!(cols.len(), 2 * cell);
+        let glyph_at = |col: usize| cells.iter().find(|&&(_, c, _)| c == col).unwrap().2;
+        assert_eq!(glyph_at(cols[0]), '░', "half intensity in bar 1");
+        assert_eq!(glyph_at(cols[cell]), '▓', "full intensity in bar 2");
+    }
+
+    #[test]
+    fn trade_markers_sit_in_the_bar_that_contains_their_time() {
+        let marker = |ts, buy| TradeMarker {
+            price: 100.5,
+            ts,
+            buy,
+        };
+        let out = quad_chart(vec![], vec![marker(70, true), marker(130, false)]);
+        let col_of = |glyph: char| {
+            out.lines()
+                .find_map(|l| l.chars().position(|c| c == glyph))
+                .unwrap_or_else(|| panic!("missing {glyph}:\n{out}"))
+        };
+        assert_eq!(col_of('▼') - col_of('▲'), Style::OhlcBars.cell_width());
+        // A trade outside the visible candles is not drawn.
+        let out = quad_chart(vec![], vec![marker(500, true)]);
+        assert!(!out.contains('▲'));
+    }
+
+    #[test]
+    fn a_trade_at_the_bars_close_still_shows_its_marker() {
+        // Bar 1 closes at 99.0; a trade there must not vanish under the close tick.
+        let out = quad_chart(
+            vec![],
+            vec![TradeMarker {
+                price: 99.0,
+                ts: 70,
+                buy: true,
+            }],
+        );
+        assert!(out.contains('▲'), "marker hidden by the bar:\n{out}");
+        assert!(out.contains('│'), "the high-low line must still be drawn");
+    }
+
+    #[test]
+    fn annotation_inside_the_last_candles_interval_is_drawn() {
+        let s = quad();
+        let view = cull(&s, &Viewport::full(s.len()));
+        let mut o = opts(60, 14, Style::OhlcBars);
+        o.annotations = vec![Annotation {
+            ts: 200,
+            label: "NOW".to_string(),
+        }];
+        assert!(render_chart(&view, &o).contains("NOW"));
     }
 }

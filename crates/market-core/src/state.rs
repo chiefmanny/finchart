@@ -27,7 +27,8 @@ pub enum ApplyResult {
     Trade(CandleUpdate),
     /// The order book changed (snapshot or update).
     Depth,
-    /// A time tick (heatmap recorded if enabled).
+    /// A time tick: the candle series advanced to its time (flat candles for
+    /// quiet intervals) and a heatmap column was recorded if enabled.
     Heartbeat,
 }
 
@@ -81,6 +82,8 @@ impl ChartState {
                 ApplyResult::Depth
             }
             MarketEvent::Heartbeat { ts } => {
+                // Time passes even when nothing trades: keep the series time-linear.
+                self.builder.advance_to(*ts);
                 if let Some(heatmap) = &mut self.heatmap {
                     heatmap.record(&self.book, *ts);
                 }
@@ -346,5 +349,26 @@ mod tests {
         replay_events(&mut replayed, &parsed);
 
         assert_eq!(direct, replayed);
+    }
+
+    #[test]
+    fn heartbeat_advances_a_quiet_series_to_its_time() {
+        let mut s = state(Some(8));
+        s.apply(&trade(60, 100.0, 2.0, Some(Side::Buy)));
+        // Three quiet minutes: the heartbeat opens flat candles up to 240.
+        s.apply(&MarketEvent::Heartbeat { ts: 245 });
+        let ts: Vec<i64> = s.series().ts().to_vec();
+        assert_eq!(ts, vec![60, 120, 180, 240]);
+        assert_eq!(s.current().unwrap().volume, 0.0);
+        assert_eq!(s.cumulative_delta(), 2.0); // flat candles add no flow
+        assert_eq!(s.heatmap().unwrap().time_buckets(), 1);
+    }
+
+    #[test]
+    fn heartbeat_before_any_trade_opens_no_candle() {
+        let mut s = state(Some(8));
+        s.apply(&snapshot(1));
+        s.apply(&MarketEvent::Heartbeat { ts: 600 });
+        assert!(s.series().is_empty());
     }
 }

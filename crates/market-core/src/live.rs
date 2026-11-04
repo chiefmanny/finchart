@@ -57,8 +57,18 @@ pub enum CandleUpdate {
     Rolled { closed: Candle },
 }
 
+/// Longest run of quiet intervals [`CandleBuilder`] fills with flat candles. A
+/// longer gap (a feed outage, a timestamp jump) is skipped instead: the series
+/// resumes at the new interval, so one bad timestamp cannot allocate millions of
+/// candles.
+pub const MAX_GAP_FILL: i64 = 100_000;
+
 /// Folds ticks into a `CandleSeries`. The forming candle is the last element of
 /// the series, mutated in place via [`CandleSeries::update_last`].
+///
+/// The series is **time-linear**: every interval gets a candle. An interval with
+/// no trades becomes a flat, zero-volume candle at the previous close, either when
+/// the next trade arrives or when [`advance_to`](Self::advance_to) moves the clock.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandleBuilder {
     series: CandleSeries,
@@ -134,21 +144,27 @@ impl CandleBuilder {
             .sum()
     }
 
-    /// Ingest a tick, mutating the forming candle (or rolling to a new one).
+    /// Ingest a tick, mutating the forming candle (or rolling to a new one). Quiet
+    /// intervals between the forming candle and the tick become flat candles.
     pub fn ingest(&mut self, tick: Tick) -> CandleUpdate {
         if !self.forming {
-            self.align_to(tick.ts);
-            let open = self.series.last().map(|c| c.close).unwrap_or(tick.price);
-            self.open_candle(open);
-            self.apply(tick);
+            if self.series.is_empty() {
+                // No price yet to carry forward: the first tick seeds the series.
+                self.align_to(tick.ts);
+                self.open_candle(tick.price);
+            } else if self.advance_to(tick.ts) == 0 {
+                // A tick before the next open never rewinds history.
+                let prior_close = self.series.last().expect("history exists").close;
+                self.open_candle(prior_close);
+            }
             self.forming = true;
+            self.apply(tick);
             return CandleUpdate::Opened;
         }
 
         if tick.ts >= self.current_open_ts + self.interval_secs {
             let closed = self.series.last().expect("forming candle exists");
-            self.align_to(tick.ts);
-            self.open_candle(closed.close);
+            self.advance_to(tick.ts);
             self.apply(tick);
             return CandleUpdate::Rolled { closed };
         }
@@ -157,8 +173,41 @@ impl CandleBuilder {
         CandleUpdate::Updated
     }
 
-    /// Advance `current_open_ts` to the interval containing `ts` (skips empty
-    /// intervals; synthetic streams don't produce gaps, but this stays correct).
+    /// Move the clock to `ts`: open a flat candle at the last close for every
+    /// interval from the next one up to the one containing `ts`, leaving the last
+    /// of them as the forming candle. Returns how many candles were opened (0 when
+    /// `ts` is still inside the forming interval, or before any price exists).
+    ///
+    /// Heartbeats call this so a quiet market keeps advancing in time. A gap longer
+    /// than [`MAX_GAP_FILL`] intervals is skipped: one candle opens at `ts`.
+    pub fn advance_to(&mut self, ts: i64) -> usize {
+        let Some(last) = self.series.last() else {
+            return 0;
+        };
+        let next = if self.forming {
+            self.current_open_ts + self.interval_secs
+        } else {
+            self.current_open_ts
+        };
+        if ts < next {
+            return 0;
+        }
+        let intervals = (ts - next) / self.interval_secs + 1;
+        let first = if intervals > MAX_GAP_FILL {
+            intervals - 1
+        } else {
+            0
+        };
+        for k in first..intervals {
+            self.current_open_ts = next + k * self.interval_secs;
+            self.open_candle(last.close);
+        }
+        self.forming = true;
+        (intervals - first) as usize
+    }
+
+    /// Advance `current_open_ts` to the interval containing `ts`. Used only to
+    /// place the very first candle; later gaps go through [`advance_to`](Self::advance_to).
     ///
     /// Computed rather than walked. A chart built from no history opens at 0, so a
     /// first tick bearing a real epoch timestamp sits ~1.8 billion intervals away --
@@ -439,5 +488,101 @@ mod tests {
         b.ingest(tick(100, 100.0, 5.0));
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
         assert_eq!(b.current().unwrap().ts, 100);
+    }
+
+    // --- time-linear series: quiet intervals become flat candles ----------------
+
+    fn flat(ts: i64, price: f64) -> Candle {
+        Candle {
+            ts,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_tick_after_quiet_intervals_fills_them_with_flat_candles() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(tick(60, 101.0, 10.0));
+        let closed = b.current().unwrap();
+
+        // Nothing trades at 120 or 180; the next trade lands in the 240 interval.
+        let upd = b.ingest(tick(250, 103.0, 4.0));
+        assert_eq!(upd, CandleUpdate::Rolled { closed });
+
+        let s = b.series();
+        assert_eq!(s.len(), 5); // history, 60, flat 120, flat 180, 240
+        assert_eq!(s.get(2), Some(flat(120, 101.0)));
+        assert_eq!(s.get(3), Some(flat(180, 101.0)));
+        assert_eq!(
+            b.current(),
+            Some(Candle {
+                ts: 240,
+                open: 101.0,
+                high: 103.0,
+                low: 101.0,
+                close: 103.0,
+                volume: 4.0,
+            })
+        );
+        // Flat candles carry no order flow.
+        assert_eq!(&s.buy_volume()[2..4], &[0.0, 0.0]);
+        assert_eq!(&s.sell_volume()[2..4], &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn advance_to_extends_a_quiet_series_up_to_now() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(tick(60, 101.0, 10.0));
+
+        assert_eq!(b.advance_to(185), 2); // opens 120 and 180
+        assert_eq!(b.series().len(), 4);
+        assert_eq!(b.current(), Some(flat(180, 101.0)));
+
+        // A trade in the same interval updates that flat candle in place.
+        assert_eq!(b.ingest(tick(190, 99.0, 2.0)), CandleUpdate::Updated);
+        assert_eq!(b.series().len(), 4);
+        let c = b.current().unwrap();
+        assert_eq!((c.open, c.low, c.close, c.volume), (101.0, 99.0, 99.0, 2.0));
+    }
+
+    #[test]
+    fn advance_to_inside_the_forming_interval_changes_nothing() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        b.ingest(tick(60, 101.0, 10.0));
+        let before = b.clone();
+        assert_eq!(b.advance_to(119), 0);
+        assert_eq!(b, before);
+    }
+
+    #[test]
+    fn advance_to_without_any_price_does_nothing() {
+        let mut b = CandleBuilder::new(60, 0);
+        assert_eq!(b.advance_to(600), 0);
+        assert!(b.series().is_empty());
+        assert_eq!(b.current(), None);
+    }
+
+    #[test]
+    fn advance_from_history_opens_a_flat_forming_candle() {
+        let mut b = CandleBuilder::from_history(history(100.0), 60);
+        assert_eq!(b.advance_to(60), 1);
+        assert_eq!(b.current(), Some(flat(60, 100.0)));
+        assert_eq!(b.ingest(tick(70, 101.0, 3.0)), CandleUpdate::Updated);
+        assert_eq!(b.series().len(), 2);
+    }
+
+    #[test]
+    fn a_gap_longer_than_the_fill_cap_is_skipped_not_filled() {
+        let start = std::time::Instant::now();
+        let mut b = CandleBuilder::from_history(history(100.0), 1);
+        b.ingest(tick(1, 100.0, 1.0));
+        b.ingest(tick(MAX_GAP_FILL * 10, 101.0, 1.0));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(b.series().len(), 3); // history, ts 1, and the new candle
+        assert_eq!(b.current().unwrap().ts, MAX_GAP_FILL * 10);
     }
 }

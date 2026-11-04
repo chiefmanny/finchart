@@ -101,8 +101,13 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   `Tick` stream into a `CandleSeries`: the forming candle is the *last element*,
   mutated in place via `CandleSeries::update_last` (new open = prior close, then
   high/low/close/volume fold in per tick); an interval boundary pushes a new
-  candle (`CandleUpdate::Rolled`). Rendering culls the series directly — the live
-  candle is just the last bar, so `render_chart`/LOD/follow all work unchanged.
+  candle (`CandleUpdate::Rolled`). The series is **time-linear**: quiet intervals
+  become flat zero-volume candles at the last close, both when the next tick lands
+  and via `advance_to(ts)`, which `ChartState` calls on every `Heartbeat` so a quiet
+  market keeps advancing (no candle before the first price; gaps longer than
+  `MAX_GAP_FILL` intervals are skipped, not filled). Rendering culls the series
+  directly — the live candle is just the last bar, so `render_chart`/LOD/follow all
+  work unchanged.
   `synth::ticks(LiveConfig)` is the deterministic synthetic tick source;
   `Viewport::tail` follows the newest candle.
 - **Order flow.** `CandleSeries` carries `buy_volume`/`sell_volume` columns
@@ -131,15 +136,22 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   is handled and price→row bucketing happens at render time. `record(&book, ts)`
   snapshots the book each depth step; accessors give `time_buckets`,
   `price_buckets`, `max_liquidity`, `cells_in_price_range`, combined
-  `columns_in_range`, and **side-aware `columns_in_range_sided`** (render export).
+  `columns_in_range`, and **side-aware `columns_in_range_sided`** (render export,
+  each column with its `ts`; `HeatmapView::from_heatmap` converts it).
   `render_chart`'s `heatmap: Option<HeatmapView>` draws a coarse `· ░ ▒ ▓`
-  intensity **background layer** (newest column → rightmost) *before* the bars, so
-  candles draw on top; dimensions stay `width × height`. It is **side-aware**
+  intensity **background layer** *before* the bars, so candles draw on top;
+  dimensions stay `width × height`. **Time-aligned:** each column goes under the
+  bar whose time span contains its `ts` (filling that bar's cell; columns sharing a
+  bar are averaged); columns before the first visible candle or after the last
+  candle's interval are dropped. Trade markers and annotations use the same
+  timestamp→bar mapping (`BarSpans` in `render.rs`). It is **side-aware**
   (cells carry `is_bid`; bid green / ask red), **normalized by the max rendered row
   total** (cells don't saturate), the ramp is **capped at `▓`** (no full block),
   and a `· heatmap bid/ask` legend appears in the status line.
   `ChartOptions.trades: Option<TradeMarkers>` overlays executed trades (`▲` buy /
-  `▼` sell) above the heatmap, below candles. The heatmap is **off by default in
+  `▼` sell, each with a `ts`) in the right-hand column of their bar — drawn on top
+  of multi-column bars (that column only holds the close tick), under one-column
+  ones. The heatmap is **off by default in
   the interactive viewer** (`ReplayConfig.show_heatmap`); it is on in the live
   snapshot and scenarios. Not a footprint chart.
 - **Scenarios.** `market_core::scenario(ScenarioConfig)` produces deterministic
@@ -152,8 +164,9 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   `ChartState::apply` → `ApplyResult`. `ChartState` owns the `CandleBuilder` +
   `OrderBook` + optional `LiquidityHeatmap` + a bounded recent-trades ring;
   `Trade` folds a candle, depth events update the book, and `Heartbeat` is the
-  neutral "end-of-bucket" tick that records a heatmap column (so cadence is
-  source-controlled, not wired into the book). Both runners (`examples-live`
+  neutral "end-of-bucket" tick that advances the candle clock (flat candles for
+  quiet intervals) and records a heatmap column (so cadence is source-controlled,
+  not wired into the book). Both runners (`examples-live`
   `Replay` and `scenarios`) build `MarketEvent`s and apply them — they no longer
   mutate the three structures directly. `DepthGen::step(ts, mid)` is **pure**: it
   returns a `DepthDelta` (`Snapshot`/`Updates`) instead of mutating a book.

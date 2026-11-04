@@ -14,8 +14,7 @@ use backend_terminal::{
     html, render_chart, ChartOptions, ColorMode, HeatmapView, Style, TradeMarker, TradeMarkers,
 };
 use market_core::{
-    scenario, BookSide, Candle, CandleSeries, ChartState, MarketEvent, ScenarioConfig,
-    ScenarioKind, Side,
+    scenario, Candle, CandleSeries, ChartState, MarketEvent, ScenarioConfig, ScenarioKind, Side,
 };
 use render_core::{cull, Viewport};
 
@@ -122,7 +121,7 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
         for trade in &step.trades {
             markers.push(TradeMarker {
                 price: trade.price,
-                col_from_right: (up_to - 1) - t,
+                ts: trade.ts,
                 buy: trade.side == Some(Side::Buy),
             });
         }
@@ -139,15 +138,6 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
     let (lo, hi) = view
         .price_extent()
         .unwrap_or((cfg.mid - 1.0, cfg.mid + 1.0));
-    let columns = heatmap
-        .columns_in_range_sided(lo, hi)
-        .into_iter()
-        .map(|col| {
-            col.into_iter()
-                .map(|(p, l, side)| (p, l, side == BookSide::Bid))
-                .collect()
-        })
-        .collect();
 
     let stats = ScenarioStats {
         time_buckets: heatmap.time_buckets(),
@@ -167,10 +157,7 @@ fn render(kind: ScenarioKind, up_to: usize, color: ColorMode) -> (String, Scenar
             show_volume: false,
             show_delta: false,
             depth: None,
-            heatmap: Some(HeatmapView {
-                columns,
-                max_liquidity: heatmap.max_liquidity(),
-            }),
+            heatmap: Some(HeatmapView::from_heatmap(heatmap, lo, hi)),
             trades: Some(TradeMarkers { markers }),
             annotations: Vec::new(),
             title: format!("scenario: {}", scenario_name(kind)),
