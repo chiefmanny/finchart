@@ -4,9 +4,7 @@ members = [
     "crates/market-core",
     "crates/render-core",
     "crates/backend-terminal",
-    "examples-bench",
-    "examples-tui",
-    "examples-live",
+    "finchart",
     "examples-matching-engine",
     "finchart-web",
 ]

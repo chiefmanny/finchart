@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use backend_terminal::{html, ColorMode};
 
-use crate::replay::{Replay, ReplayConfig};
+use super::replay::{Replay, ReplayConfig};
 
 pub(crate) const CHART_WIDTH: usize = 120;
 pub(crate) const CHART_HEIGHT: usize = 30;

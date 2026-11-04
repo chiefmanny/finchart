@@ -1,0 +1,19 @@
+[package]
+name = "finchart"
+description = "Terminal front-end for the finchart charting engine: live, browse, replay, bench."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "finchart"
+path = "src/main.rs"
+
+[dependencies]
+market-core.workspace = true
+render-core.workspace = true
+backend-terminal.workspace = true
+# Raw-mode input, the alternate screen and timed event polling for the
+# interactive subcommands. Confined to this binary; the core crates stay zero-dep.
+crossterm = "0.28"

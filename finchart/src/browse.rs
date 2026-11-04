@@ -1,23 +1,19 @@
-//! `examples-tui`: an interactive synthetic terminal chart viewer.
+//! `finchart browse`: an interactive viewer over a deterministic synthetic series.
 //!
 //! Pan (`h`/`l` or `←`/`→`), zoom (`k`/`j` or `+`/`-`), reset (`r`), quit (`q`).
 //! All navigation and rendering logic lives in tested library code
-//! (`render_core::Viewport`, `backend_terminal::render_chart`); this binary is a
+//! (`render_core::Viewport`, `backend_terminal::render_chart`); this module is a
 //! thin input/draw loop.
 
-use std::io::{self, Write};
+use std::io;
 
-use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{
-    self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
-    LeaveAlternateScreen,
-};
-use crossterm::{execute, queue};
 
 use backend_terminal::{render_chart, ChartOptions, ColorMode, Style};
 use market_core::{generate, CandleSeries, GenConfig};
 use render_core::{cull, Viewport};
+
+use crate::term::Screen;
 
 /// Candles in the deterministic demo series.
 const SERIES_LEN: usize = 5_000;
@@ -116,17 +112,6 @@ impl App {
     }
 }
 
-/// Restores the terminal (raw mode, alternate screen, cursor) on drop, so an
-/// early return or panic never leaves the terminal in a broken state.
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
-    }
-}
-
 fn demo_series() -> CandleSeries {
     generate(&GenConfig {
         seed: 42,
@@ -139,29 +124,13 @@ fn demo_series() -> CandleSeries {
     })
 }
 
-fn main() -> io::Result<()> {
+/// Run the viewer until a quit key.
+pub fn run() -> io::Result<()> {
     let mut app = App::new(demo_series());
-
-    let mut stdout = io::stdout();
-    enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
-    let _guard = TerminalGuard;
-
-    let mut painted_size = None;
+    let mut screen = Screen::enter()?;
     loop {
-        let (cols, rows) = terminal::size().unwrap_or((120, 30));
-        let chart = app.render(cols as usize, rows as usize);
-
-        // Frames fill the whole screen, so repaint in place; a full clear (which
-        // can flash a blank frame mid-write) is only needed when the size changes.
-        if painted_size != Some((cols, rows)) {
-            queue!(stdout, Clear(ClearType::All))?;
-            painted_size = Some((cols, rows));
-        }
-        queue!(stdout, MoveTo(0, 0))?;
-        // Raw mode needs explicit carriage returns between rows.
-        write!(stdout, "{}", chart.replace('\n', "\r\n"))?;
-        stdout.flush()?;
+        let size = screen.size();
+        screen.paint(&app.render(size.0, size.1), size)?;
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -170,7 +139,6 @@ fn main() -> io::Result<()> {
             break;
         }
     }
-
     Ok(())
 }
 

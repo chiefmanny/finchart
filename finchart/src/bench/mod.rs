@@ -1,5 +1,6 @@
-//! `examples-bench`: wires the crates together to print a demo candlestick chart
-//! and (later) a 10k/100k/1M generate/cull/render timing table.
+//! `finchart bench`: a demo candlestick chart and the 10k/100k/1M
+//! generate/cull/render timing table. The `snapshot` submodule backs
+//! `finchart snapshot chart`.
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -8,7 +9,7 @@ use backend_terminal::{render_chart, ChartOptions, ColorMode, Style};
 use market_core::{generate, CandleSeries, GenConfig};
 use render_core::{cull, Viewport};
 
-mod snapshot;
+pub(crate) mod snapshot;
 
 /// Visible window (candles) culled from each dataset for the benchmark.
 const VISIBLE: usize = 200;
@@ -172,28 +173,8 @@ fn fmt_count(n: usize) -> String {
     out
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|a| a == "--snapshot") {
-        let dir = args
-            .get(pos + 1)
-            .map(String::as_str)
-            .unwrap_or("artifacts/tui");
-        match snapshot::write_all(std::path::Path::new(dir)) {
-            Ok(paths) => {
-                println!("wrote {} snapshot artifacts:", paths.len());
-                for p in paths {
-                    println!("  {}", p.display());
-                }
-            }
-            Err(e) => {
-                eprintln!("snapshot failed: {e}");
-                std::process::exit(1);
-            }
-        }
-        return;
-    }
-
+/// Print the demo chart, then the benchmark table.
+pub fn run() {
     println!("finchart demo — synthetic candles, last 120 of 240\n");
     println!("{}", demo_chart(120, 30, ColorMode::Ansi));
     println!();

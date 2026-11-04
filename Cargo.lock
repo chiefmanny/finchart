@@ -195,25 +195,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "examples-bench"
-version = "0.1.0"
-dependencies = [
- "backend-terminal",
- "market-core",
- "render-core",
-]
-
-[[package]]
-name = "examples-live"
-version = "0.1.0"
-dependencies = [
- "backend-terminal",
- "crossterm",
- "market-core",
- "render-core",
-]
-
-[[package]]
 name = "examples-matching-engine"
 version = "0.1.0"
 dependencies = [
@@ -229,7 +210,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "examples-tui"
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
+name = "finchart"
 version = "0.1.0"
 dependencies = [
  "backend-terminal",
@@ -237,12 +224,6 @@ dependencies = [
  "market-core",
  "render-core",
 ]
-
-[[package]]
-name = "fastrand"
-version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "finchart-web"
