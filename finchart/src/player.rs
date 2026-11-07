@@ -18,7 +18,7 @@ use market_core::{parse_events, CandleSeries, ChartState, MarketEvent};
 use render_core::Viewport;
 
 use crate::frame::{self, Frame};
-use crate::pointer::{Nav, Pointer, ZOOM_IN, ZOOM_OUT};
+use crate::nav::{Navigator, ZOOM_IN, ZOOM_OUT};
 use crate::term::{is_quit, Screen};
 
 /// Candle interval when neither a flag nor the file's header gives one: the
@@ -156,10 +156,9 @@ pub struct Player {
     position: f64,
     playing: bool,
     speed: f64,
-    /// `None` follows the newest candle; `Some` is a viewport the user moved to.
-    manual: Option<Viewport>,
+    /// Follow-or-hold viewport plus the crosshair.
+    nav: Navigator,
     help: bool,
-    pointer: Pointer,
     /// The terminal size frames are drawn at, for mapping the crosshair and mouse.
     size: (usize, usize),
 }
@@ -181,9 +180,8 @@ impl Player {
             position: 0.0,
             playing: false,
             speed: 1.0,
-            manual: None,
+            nav: Navigator::default(),
             help: false,
-            pointer: Pointer::default(),
             size: (120, 30),
         };
         player.fold_to_position();
@@ -223,7 +221,7 @@ impl Player {
 
     #[cfg(test)]
     pub fn is_following(&self) -> bool {
-        self.manual.is_none()
+        self.nav.is_following()
     }
 
     #[cfg(test)]
@@ -271,10 +269,10 @@ impl Player {
     pub fn act(&mut self, action: Action) -> bool {
         match action {
             Action::Quit => return false,
-            Action::Escape => return self.pointer.hide(),
-            Action::ToggleCrosshair => self.pointer.toggle(self.layout().as_ref()),
-            Action::StepBack => self.pointer.step(-1, self.layout().as_ref()),
-            Action::StepForward => self.pointer.step(1, self.layout().as_ref()),
+            Action::Escape => return self.nav.pointer.hide(),
+            Action::ToggleCrosshair => self.nav.pointer.toggle(self.layout().as_ref()),
+            Action::StepBack => self.nav.pointer.step(-1, self.layout().as_ref()),
+            Action::StepForward => self.nav.pointer.step(1, self.layout().as_ref()),
             Action::TogglePlay => {
                 if !self.playing && self.position >= self.duration {
                     self.seek(0.0);
@@ -284,11 +282,11 @@ impl Player {
             Action::Seek(delta) => self.seek(self.position + delta),
             Action::Faster => self.speed = step_speed(self.speed, 1),
             Action::Slower => self.speed = step_speed(self.speed, -1),
-            Action::PanLeft => self.pan_by(-self.pan_step()),
-            Action::PanRight => self.pan_by(self.pan_step()),
+            Action::PanLeft => self.pan_by(-self.nav.pan_step(self.len(), self.window())),
+            Action::PanRight => self.pan_by(self.nav.pan_step(self.len(), self.window())),
             Action::ZoomIn => self.zoom_by(ZOOM_IN),
             Action::ZoomOut => self.zoom_by(ZOOM_OUT),
-            Action::Follow => self.manual = None,
+            Action::Follow => self.nav.follow(),
             Action::Restart => self.seek(0.0),
             Action::End => self.seek(self.duration),
             Action::ToggleHeatmap => self.settings.heatmap = !self.settings.heatmap,
@@ -301,12 +299,9 @@ impl Player {
     /// Handle a mouse event: hover moves the crosshair, the wheel zooms, a left
     /// drag pans.
     pub fn mouse(&mut self, ev: MouseEvent) {
-        let visible = self.viewport(self.size.0).candle_count();
-        match self.pointer.mouse(ev, self.layout().as_ref(), visible) {
-            Nav::Zoom(factor) => self.zoom_by(factor),
-            Nav::Pan(candles) => self.pan_by(candles),
-            Nav::None => {}
-        }
+        let layout = self.layout();
+        let (len, window) = (self.len(), self.window());
+        self.nav.mouse(ev, layout.as_ref(), len, window);
     }
 
     /// Remember the terminal size frames are drawn at.
@@ -316,11 +311,7 @@ impl Player {
 
     /// The viewport for a frame `width` columns wide.
     pub fn viewport(&self, width: usize) -> Viewport {
-        let len = self.state.series().len();
-        match self.manual {
-            Some(vp) => vp.clamp(len),
-            None => Viewport::tail(len, self.follow_window(width)),
-        }
+        self.nav.viewport(self.len(), self.follow_window(width))
     }
 
     /// Render the chart (or the help screen) at the given size.
@@ -348,7 +339,7 @@ impl Player {
             height,
             color,
             heatmap: self.settings.heatmap,
-            crosshair: self.pointer.crosshair,
+            crosshair: self.nav.pointer.crosshair,
             title,
         }
     }
@@ -388,24 +379,23 @@ impl Player {
             .unwrap_or_else(|| (width.saturating_sub(CHROME_COLS) / 3).max(10))
     }
 
-    /// What is on screen now; pan and zoom start from it (and leave follow mode).
-    fn current_view(&self) -> Viewport {
-        self.manual.unwrap_or_else(|| self.viewport(self.size.0))
+    fn len(&self) -> usize {
+        self.state.series().len()
     }
 
-    /// Keyboard pan step: a tenth of the window, at least one candle.
-    fn pan_step(&self) -> isize {
-        (self.current_view().candle_count() / 10).max(1) as isize
+    /// The follow window at the remembered width.
+    fn window(&self) -> usize {
+        self.follow_window(self.size.0)
     }
 
     fn pan_by(&mut self, candles: isize) {
-        let len = self.state.series().len();
-        self.manual = Some(self.current_view().pan(candles, len));
+        let (len, window) = (self.len(), self.window());
+        self.nav.pan(candles, len, window);
     }
 
     fn zoom_by(&mut self, factor: f64) {
-        let len = self.state.series().len();
-        self.manual = Some(self.current_view().zoom(factor, len));
+        let (len, window) = (self.len(), self.window());
+        self.nav.zoom(factor, len, window);
     }
 
     /// Fold every not-yet-applied event at or before the clock.
@@ -502,7 +492,7 @@ fn help_screen(width: usize, height: usize) -> String {
 
 /// Play `player` in the terminal until a quit key.
 pub fn run(mut player: Player) -> io::Result<()> {
-    let mut screen = Screen::enter_with_mouse()?;
+    let mut screen = Screen::enter()?;
     let frame_dur = Duration::from_millis(33);
     let mut last = Instant::now();
     loop {

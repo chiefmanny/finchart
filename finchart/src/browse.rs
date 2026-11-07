@@ -179,7 +179,7 @@ fn demo_series() -> CandleSeries {
 /// Run the viewer until a quit key.
 pub fn run() -> io::Result<()> {
     let mut app = App::new(demo_series());
-    let mut screen = Screen::enter_with_mouse()?;
+    let mut screen = Screen::enter()?;
     loop {
         let size = screen.size();
         app.resize(size.0, size.1);

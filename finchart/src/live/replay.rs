@@ -4,12 +4,18 @@
 
 use std::iter::Peekable;
 
-use backend_terminal::{render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Style};
+use backend_terminal::{
+    layout, render_chart, ChartOptions, ColorMode, DepthPanel, HeatmapView, Layout, Style,
+};
+use crossterm::event::MouseEvent;
 use market_core::{
     events, generate, BookSide, Candle, ChartState, DepthConfig, EventConfig, EventSource, Flow,
     GenConfig, LiquidityHeatmap, LiveConfig, MarketEvent,
 };
 use render_core::{cull, Viewport};
+
+use super::Action;
+use crate::nav::{Navigator, ZOOM_IN, ZOOM_OUT};
 
 /// Where historical candles start (epoch seconds).
 const HISTORY_START_TS: i64 = 1_600_000_000;
@@ -82,6 +88,10 @@ pub struct Replay {
     total_ticks: usize,
     depth_panel_levels: usize,
     show_heatmap: bool,
+    /// Follow-or-hold viewport plus the crosshair.
+    nav: Navigator,
+    /// The terminal size frames are drawn at, for mapping the crosshair and mouse.
+    size: (usize, usize),
 }
 
 impl Replay {
@@ -143,6 +153,8 @@ impl Replay {
             total_ticks: 0,
             depth_panel_levels: cfg.depth_panel_levels,
             show_heatmap: cfg.show_heatmap,
+            nav: Navigator::default(),
+            size: (120, 30),
         };
         // Apply the seeding events (initial depth snapshot + heartbeat) so the book
         // and heatmap are populated before the first tick.
@@ -181,7 +193,44 @@ impl Replay {
 
     /// The follow-latest viewport (most recent `window` candles).
     pub fn viewport(&self) -> Viewport {
-        Viewport::tail(self.series_len(), self.window)
+        self.nav.viewport(self.series_len(), self.window)
+    }
+
+    /// Apply a key action; returns `false` when the view should quit.
+    pub fn act(&mut self, action: Action) -> bool {
+        let (len, window) = (self.series_len(), self.window);
+        match action {
+            Action::Quit => return false,
+            Action::Escape => return self.nav.pointer.hide(),
+            Action::ToggleCrosshair => self.nav.pointer.toggle(self.layout().as_ref()),
+            Action::StepBack => self.nav.pointer.step(-1, self.layout().as_ref()),
+            Action::StepForward => self.nav.pointer.step(1, self.layout().as_ref()),
+            Action::PanLeft => self.nav.pan(-self.nav.pan_step(len, window), len, window),
+            Action::PanRight => self.nav.pan(self.nav.pan_step(len, window), len, window),
+            Action::ZoomIn => self.nav.zoom(ZOOM_IN, len, window),
+            Action::ZoomOut => self.nav.zoom(ZOOM_OUT, len, window),
+            Action::Follow => self.nav.follow(),
+            Action::None => {}
+        }
+        true
+    }
+
+    /// Hover moves the crosshair, the wheel zooms, a left drag pans.
+    pub fn mouse(&mut self, ev: MouseEvent) {
+        let layout = self.layout();
+        let (len, window) = (self.series_len(), self.window);
+        self.nav.mouse(ev, layout.as_ref(), len, window);
+    }
+
+    /// Remember the terminal size frames are drawn at.
+    pub fn resize(&mut self, width: usize, height: usize) {
+        self.size = (width, height);
+    }
+
+    fn layout(&self) -> Option<Layout> {
+        let view = cull(self.state.series(), &self.viewport());
+        let (w, h) = self.size;
+        layout(&view, &self.options(w, h, ColorMode::Plain, ""))
     }
 
     /// Render the current frame at the given size and color mode, using `title`
@@ -192,23 +241,24 @@ impl Replay {
     pub fn render(&self, width: usize, height: usize, color: ColorMode, title: &str) -> String {
         let series = self.state.series();
         let view = cull(series, &self.viewport());
-        render_chart(
-            &view,
-            &ChartOptions {
-                width,
-                height,
-                color,
-                style: Style::OhlcBars,
-                show_volume: true,
-                show_delta: true,
-                depth: Some(self.depth_panel()),
-                heatmap: self.show_heatmap.then(|| self.heatmap_view()),
-                trades: None,
-                annotations: Vec::new(),
-                crosshair: None,
-                title: title.to_string(),
-            },
-        )
+        render_chart(&view, &self.options(width, height, color, title))
+    }
+
+    fn options(&self, width: usize, height: usize, color: ColorMode, title: &str) -> ChartOptions {
+        ChartOptions {
+            width,
+            height,
+            color,
+            style: Style::OhlcBars,
+            show_volume: true,
+            show_delta: true,
+            depth: Some(self.depth_panel()),
+            heatmap: self.show_heatmap.then(|| self.heatmap_view()),
+            trades: None,
+            annotations: Vec::new(),
+            crosshair: self.nav.pointer.crosshair,
+            title: title.to_string(),
+        }
     }
 
     pub fn best_bid(&self) -> Option<f64> {
@@ -492,5 +542,61 @@ mod tests {
             out.chars().any(|ch| matches!(ch, '░' | '▒' | '▓')),
             "heatmap not rendered when enabled"
         );
+    }
+
+    // --- interaction: crosshair, pan/zoom, follow ---------------------------
+
+    fn interactive() -> Replay {
+        let mut r = Replay::new(&cfg());
+        r.resize(120, 30);
+        r.advance(400);
+        r
+    }
+
+    fn status(r: &Replay) -> String {
+        r.render(120, 30, ColorMode::Plain, &r.status())
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn the_crosshair_reads_out_a_bar_and_escape_hides_it_before_quitting() {
+        let mut r = interactive();
+        r.act(Action::ToggleCrosshair);
+        let newest = status(&r);
+        assert!(newest.starts_with("⌖"), "{newest}");
+        r.act(Action::StepBack);
+        assert_ne!(status(&r), newest);
+        assert!(r.act(Action::Escape), "first Esc hides the crosshair");
+        assert!(status(&r).starts_with("finchart LIVE"));
+        assert!(!r.act(Action::Escape), "second Esc quits");
+    }
+
+    #[test]
+    fn panning_holds_the_view_while_candles_keep_arriving() {
+        let mut r = interactive();
+        r.act(Action::PanLeft);
+        let held = r.viewport();
+        assert!(held.end_index < r.series_len());
+        r.advance(300); // more candles arrive
+        assert_eq!(r.viewport(), held, "a held view does not move");
+        r.act(Action::Follow);
+        assert_eq!(r.viewport().end_index, r.series_len());
+    }
+
+    #[test]
+    fn the_wheel_zooms_out_of_follow_mode() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let mut r = interactive();
+        let before = r.viewport().candle_count();
+        r.mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 60,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(r.viewport().candle_count() < before);
     }
 }

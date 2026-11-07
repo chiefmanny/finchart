@@ -1,6 +1,6 @@
-//! Terminal plumbing shared by the interactive subcommands: raw mode and the
-//! alternate screen (restored on drop, even on panic), in-place repainting, and
-//! the common quit keys.
+//! Terminal plumbing shared by the interactive subcommands: raw mode, the
+//! alternate screen and mouse capture (all restored on drop, even on panic),
+//! in-place repainting, and the common quit keys.
 
 use std::io::{self, Stdout, Write};
 
@@ -16,38 +16,21 @@ use crossterm::{execute, queue};
 pub struct Screen {
     stdout: Stdout,
     painted_size: Option<(u16, u16)>,
-    mouse: bool,
 }
 
 impl Screen {
-    /// Enter raw mode and the alternate screen, hiding the cursor.
+    /// Enter raw mode and the alternate screen, hide the cursor, and capture the
+    /// mouse (hover, wheel, drag).
     pub fn enter() -> io::Result<Self> {
-        Self::open(false)
-    }
-
-    /// As [`enter`](Self::enter), and also capture the mouse (hover, wheel,
-    /// drag). Views that poll on a timer leave it off: mouse motion would wake
-    /// their loop constantly.
-    pub fn enter_with_mouse() -> io::Result<Self> {
-        Self::open(true)
-    }
-
-    fn open(mouse: bool) -> io::Result<Self> {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
-        let entered = if mouse {
-            execute!(stdout, EnterAlternateScreen, Hide, EnableMouseCapture)
-        } else {
-            execute!(stdout, EnterAlternateScreen, Hide)
-        };
-        if let Err(e) = entered {
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, Hide, EnableMouseCapture) {
             let _ = disable_raw_mode();
             return Err(e);
         }
         Ok(Self {
             stdout,
             painted_size: None,
-            mouse,
         })
     }
 
@@ -75,9 +58,7 @@ impl Screen {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        if self.mouse {
-            let _ = execute!(self.stdout, DisableMouseCapture);
-        }
+        let _ = execute!(self.stdout, DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = execute!(self.stdout, LeaveAlternateScreen, Show);
     }

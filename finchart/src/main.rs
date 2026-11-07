@@ -10,6 +10,7 @@ mod frame;
 #[cfg(test)]
 mod golden;
 mod live;
+mod nav;
 mod player;
 mod pointer;
 mod term;
