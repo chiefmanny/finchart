@@ -64,7 +64,7 @@ with [VHS](https://github.com/charmbracelet/vhs) from scripts in `docs/media/` (
 ### Live candle building — `finchart live`
 
 ```bash
-finchart live            # q / Esc quits; --fps N sets the pace
+finchart live            # c crosshair · h/l k/j pan & zoom · f follow · q quits; --fps N sets the pace
 ```
 
 A seeded synthetic tick stream (`seed = 42`, so the data is identical every run)
@@ -74,7 +74,10 @@ it rolls over to a new one. Under the price plot are a volume panel and a
 baseline and red below. The status line tracks the forming candle's OHLC, its
 delta (`Δ`), the session's cumulative delta (`CVD`), and best bid/ask and spread.
 On a wide enough terminal it also shows the last frame's update and render time in
-microseconds. On the right is a six-level **Level 2 ladder**.
+microseconds. On the right is a six-level **Level 2 ladder**. You can pan back or
+zoom while new candles keep arriving (`f` returns to the forming candle), and the
+[crosshair](#reading-a-bar--the-crosshair) and mouse work here as they do in
+`browse` and `replay`.
 
 ### Navigating history — `finchart browse`
 
@@ -100,7 +103,8 @@ pauses, `← →` seek 5 s, `↓ ↑` seek 30 s, `[ ]` change speed (0.25× to 6
 heatmap, `c` shows a [crosshair](#reading-a-bar--the-crosshair), and `?` lists
 the keys. Seeking back refolds the session from the start, so whatever second you
 land on shows exactly the chart state at that moment. With `--at 1:28`, or when
-its output is piped, it prints that single frame instead.
+its output is piped, it prints that single frame instead. `--follow` plays a file
+that is still being written; see [Live from a matching engine](#live-from-a-matching-engine).
 
 <img src="docs/media/sweep.gif" width="100%"
      alt="Terminal replay of a matching-engine session: price flat at 500.00 under a band of red resting ask liquidity, then a single bar with an 11k volume spike, after which the bars climb to about 506 while the heatmap and the depth ladder re-form around the new price.">
@@ -149,7 +153,7 @@ finchart replay web/scenarios/large_buy_sweep.txt --start 1:12 --paused   # then
 <img src="docs/media/crosshair.gif" width="100%"
      alt="The paused sweep replay with a dashed crosshair rule. The status line becomes a readout: 09-22 19:06:48, open 499.99, high 500.54, low 499.99, close 500.23, volume 10.7k, delta +9.9k. Stepping back moves the rule across earlier seconds, including a quiet second whose readout shows zero volume.">
 
-In `browse` and `replay`, `c` drops a crosshair on the newest bar and `,` / `.`
+In `live`, `browse` and `replay`, `c` drops a crosshair on the newest bar and `,` / `.`
 step it a bar at a time. The status line becomes a readout of the bar under it:
 its time to the second, OHLC, volume and delta. Above, it lands on the sweep
 (10.7k shares, +9.9k delta), then walks back through the quiet seconds before it,
@@ -195,6 +199,21 @@ streams fills, polls Level 2 snapshots and draws the live chart, and `--record`
 writes the session to a file that `finchart replay` plays back.
 For unattended capture, `--headless --duration <secs>` records without drawing
 the chart.
+
+To watch the engine with the full player instead, record headless and follow the
+file as it is written:
+
+```bash
+cargo run --release -p examples-matching-engine -- --endpoint http://127.0.0.1:50051 --symbol AAPL \
+  --headless --record session.txt            # terminal 1: flushes each batch as it arrives
+finchart replay session.txt --follow         # terminal 2
+```
+
+`--follow` works like `tail -f`: it reads each line as it is completed (a
+half-written line waits for its newline) and stays on the newest event, shown as
+`● live`. You can pause, seek back, or inspect a bar with the crosshair while
+recording continues; playing again catches up to the live edge at the current
+speed. If the file is truncated or replaced, the player reloads it.
 
 ## Quick start
 

@@ -44,6 +44,7 @@ finchart live                           # live synthetic replay (follows the for
 finchart browse                         # interactive viewer over 5,000 candles (pan/zoom/reset/quit)
 finchart replay web/scenarios/large_buy_sweep.txt --start 0:56 --speed 4   # interactive player (space ←→ ↓↑ [] hjkl f m ?)
 finchart replay FILE --start 1:12 --paused   # open paused (c: crosshair, , .: step a bar)
+finchart replay FILE --follow           # play a file that is still being written (tail -f), staying live
 finchart replay FILE --at 1:28          # print one frame (also when piped: plain text, final frame)
 finchart snapshot live artifacts/live   # deterministic before/mid/after frames
 FINCHART_BLESS=1 cargo test -p finchart golden   # re-bless golden fixtures after an intended visual change (then review git diff)
@@ -98,9 +99,15 @@ gRPC/async deps (`tonic`, `prost`, `tokio`) live **only** in
   pan/zoom/follow; terminal-free and tested. `pointer::Pointer` is the shared
   crosshair + mouse state for `browse`/`replay` (`c` toggle, `,`/`.` step a bar,
   `Esc` hides it before quitting; hover = crosshair, wheel = zoom, drag = pan, with
-  fractional drag accumulation); it maps events using `backend_terminal::layout`,
-  and `Screen::enter_with_mouse` turns on mouse capture (`live` stays without it,
-  since motion would wake its timed loop). Settings resolve flags > the file's
+  fractional drag accumulation); it maps events using `backend_terminal::layout`.
+  `nav::Navigator` holds the follow-or-hold viewport (+ the `Pointer`) for the
+  streaming views (`live`, `replay`). `Screen::enter` always captures the mouse;
+  `live` advances its market on a fixed deadline regardless of input, so mouse
+  motion never stalls it. `replay --follow` tails a growing file
+  (`tail::Tail`: complete lines only, `Polled::Reset` on truncation → reopen) and
+  `Player::append`s new events; while tailing it never pauses at the end, stays
+  on the newest event when playing at the edge (`● live`), and catches up after a
+  seek back. The adapter flushes its recorder after each batch so followers see it. Settings resolve flags > the file's
   `#` header > defaults (1 s, 0.01 — the engine recordings). The gRPC adapter
   stays a separate binary so `finchart` never builds tonic/tokio.
 - **Columnar hot path.** Candles are stored as parallel `Vec`s (one per OHLCV
