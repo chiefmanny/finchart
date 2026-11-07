@@ -13,6 +13,7 @@ mod live;
 mod nav;
 mod player;
 mod pointer;
+mod tail;
 mod term;
 
 use std::io::{self, IsTerminal};
@@ -22,6 +23,7 @@ use std::process::ExitCode;
 use backend_terminal::ColorMode;
 use cli::{Command, ReplayArgs, SnapshotKind};
 use player::Player;
+use tail::Tail;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,6 +73,15 @@ fn run(command: Command) -> io::Result<()> {
 /// Play a recording, or print one frame of it when asked (`--at`) or when stdout
 /// is not a terminal (plain text then, so piped output stays diffable).
 fn replay(args: ReplayArgs) -> io::Result<()> {
+    let tty = io::stdout().is_terminal();
+    if args.follow {
+        if !tty {
+            return Err(io::Error::other("--follow needs a terminal"));
+        }
+        let (tail, player) = open_follow(&args)?;
+        return player::run(player, Some((tail, &|| open_follow(&args))));
+    }
+
     let mut player = Player::open(
         &args.file,
         args.interval,
@@ -79,8 +90,6 @@ fn replay(args: ReplayArgs) -> io::Result<()> {
         args.heatmap,
     )?;
     player.set_speed(args.speed);
-
-    let tty = io::stdout().is_terminal();
     if args.at.is_some() || !tty {
         player.seek(args.at.unwrap_or(player.duration()));
         let color = if tty {
@@ -91,11 +100,32 @@ fn replay(args: ReplayArgs) -> io::Result<()> {
         println!("{}", player.render(args.width, args.height, color));
         return Ok(());
     }
-    player.seek(args.start);
+    player.seek(args.start.unwrap_or(0.0));
     if !args.paused {
         player.play();
     }
-    player::run(player)
+    player::run(player, None)
+}
+
+/// Open a growing recording for `--follow`: a player over what is written so
+/// far, at the live edge (or `--start`), plus the tail that feeds it more.
+fn open_follow(args: &ReplayArgs) -> io::Result<(Tail, Player)> {
+    let (tail, text) = Tail::open(&args.file)?;
+    let mut player = Player::from_text(
+        &args.file,
+        &text,
+        args.interval,
+        args.tick,
+        args.window,
+        args.heatmap,
+    );
+    player.set_speed(args.speed);
+    player.set_tailing(true);
+    player.seek(args.start.unwrap_or(player.duration()));
+    if !args.paused {
+        player.play();
+    }
+    Ok((tail, player))
 }
 
 fn print_written(paths: &[PathBuf]) {

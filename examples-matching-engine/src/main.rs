@@ -200,6 +200,11 @@ fn run_live(cfg: &Config) -> Result<(), Box<dyn std::error::Error>> {
             }
             if !events.is_empty() {
                 last_update_us = t.elapsed().as_secs_f64() * 1e6 / events.len() as f64;
+                // Flush each batch so `finchart replay --follow` sees the recording
+                // as it is written, not in 8 KB chunks (at most one flush per frame).
+                if let Some(rec) = &mut recorder {
+                    let _ = rec.flush();
+                }
             }
 
             if cfg.headless {

@@ -19,6 +19,7 @@ use render_core::Viewport;
 
 use crate::frame::{self, Frame};
 use crate::nav::{Navigator, ZOOM_IN, ZOOM_OUT};
+use crate::tail::{Polled, Tail};
 use crate::term::{is_quit, Screen};
 
 /// Candle interval when neither a flag nor the file's header gives one: the
@@ -159,6 +160,9 @@ pub struct Player {
     /// Follow-or-hold viewport plus the crosshair.
     nav: Navigator,
     help: bool,
+    /// Following a recording that is still being written (`--follow`): never
+    /// pause at the end, and stay on the newest event while at the edge.
+    tailing: bool,
     /// The terminal size frames are drawn at, for mapping the crosshair and mouse.
     size: (usize, usize),
 }
@@ -182,6 +186,7 @@ impl Player {
             speed: 1.0,
             nav: Navigator::default(),
             help: false,
+            tailing: false,
             size: (120, 30),
         };
         player.fold_to_position();
@@ -197,12 +202,26 @@ impl Player {
         heatmap: bool,
     ) -> io::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        let settings = Settings::resolve(&text, interval, tick, window, heatmap);
+        Ok(Self::from_text(
+            path, &text, interval, tick, window, heatmap,
+        ))
+    }
+
+    /// A player over recording `text` (already read from `path`, named after it).
+    pub fn from_text(
+        path: &Path,
+        text: &str,
+        interval: Option<i64>,
+        tick: Option<f64>,
+        window: Option<usize>,
+        heatmap: bool,
+    ) -> Self {
+        let settings = Settings::resolve(text, interval, tick, window, heatmap);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Ok(Self::new(&name, parse_events(&text), settings))
+        Self::new(&name, parse_events(text), settings)
     }
 
     #[cfg(test)]
@@ -260,8 +279,31 @@ impl Player {
             return;
         }
         self.seek(self.position + wall.as_secs_f64() * self.speed);
-        if self.position >= self.duration {
+        if self.position >= self.duration && !self.tailing {
             self.playing = false;
+        }
+    }
+
+    /// Follow a recording that is still being written (see [`append`](Self::append)).
+    pub fn set_tailing(&mut self, on: bool) {
+        self.tailing = on;
+    }
+
+    /// Add events read from a growing recording. A playing player at the live
+    /// edge moves to the newest event; one seeked back or paused stays put and,
+    /// when playing, catches up at its speed.
+    pub fn append(&mut self, events: Vec<MarketEvent>) {
+        let Some(last) = events.last().map(MarketEvent::ts) else {
+            return;
+        };
+        let at_edge = self.position >= self.duration;
+        if self.events.is_empty() {
+            self.start_ts = events[0].ts();
+        }
+        self.events.extend(events);
+        self.duration = (last - self.start_ts).max(0) as f64;
+        if at_edge && self.playing {
+            self.seek(self.duration);
         }
     }
 
@@ -274,7 +316,7 @@ impl Player {
             Action::StepBack => self.nav.pointer.step(-1, self.layout().as_ref()),
             Action::StepForward => self.nav.pointer.step(1, self.layout().as_ref()),
             Action::TogglePlay => {
-                if !self.playing && self.position >= self.duration {
+                if !self.playing && self.position >= self.duration && !self.tailing {
                     self.seek(0.0);
                 }
                 self.playing = !self.playing;
@@ -356,7 +398,9 @@ impl Player {
 
     /// The transport + flow summary that leads the status line.
     fn status(&self) -> String {
-        let icon = if self.playing {
+        let icon = if self.tailing && self.playing && self.position >= self.duration {
+            "● live"
+        } else if self.playing {
             "▶"
         } else if self.position >= self.duration {
             "■"
@@ -490,8 +534,13 @@ fn help_screen(width: usize, height: usize) -> String {
         .join("\n")
 }
 
-/// Play `player` in the terminal until a quit key.
-pub fn run(mut player: Player) -> io::Result<()> {
+/// A recording being followed: its tail, and how to reopen it from scratch if
+/// it is truncated or replaced.
+pub type Follow<'a> = (Tail, &'a dyn Fn() -> io::Result<(Tail, Player)>);
+
+/// Play `player` in the terminal until a quit key, feeding it whatever is
+/// appended to a followed recording.
+pub fn run(mut player: Player, mut follow: Option<Follow>) -> io::Result<()> {
     let mut screen = Screen::enter()?;
     let frame_dur = Duration::from_millis(33);
     let mut last = Instant::now();
@@ -509,6 +558,12 @@ pub fn run(mut player: Player) -> io::Result<()> {
                 }
                 Event::Mouse(ev) => player.mouse(ev),
                 _ => {}
+            }
+        }
+        if let Some((tail, reopen)) = &mut follow {
+            match tail.poll()? {
+                Polled::Events(events) => player.append(events),
+                Polled::Reset => (*tail, player) = reopen()?,
             }
         }
         let now = Instant::now();
@@ -846,5 +901,87 @@ mod tests {
         p.mouse(mouse_at(MouseEventKind::Drag(MouseButton::Left), 30));
         assert!(!p.is_following(), "a drag pans");
         assert!(zoomed.candle_count() < p.state().series().len());
+    }
+
+    // --- following a growing recording (--follow) -----------------------------
+
+    fn later(s: i64) -> Vec<MarketEvent> {
+        vec![
+            MarketEvent::Trade(Tick {
+                ts: T0 + s,
+                price: 100.5,
+                size: 7.0,
+                side: Some(Side::Buy),
+            }),
+            MarketEvent::Heartbeat { ts: T0 + s },
+        ]
+    }
+
+    fn following() -> Player {
+        let mut p = player();
+        p.set_tailing(true);
+        p.seek(p.duration());
+        p.play();
+        p
+    }
+
+    #[test]
+    fn following_tracks_new_events_at_the_live_edge() {
+        let mut p = following();
+        p.append(later(12));
+        assert_eq!(p.duration(), 12.0);
+        assert_eq!(p.position(), 12.0, "stays on the newest event");
+        assert_eq!(p.state().current().unwrap().close, 100.5);
+        let status = p.render(120, 30, ColorMode::Plain);
+        assert!(
+            status.lines().next().unwrap().contains("● live"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn following_never_pauses_at_the_edge() {
+        let mut p = following();
+        p.advance(Duration::from_secs(5));
+        assert!(p.is_playing());
+        assert_eq!(p.position(), p.duration());
+        // Play at the edge resumes; it does not restart from the beginning.
+        p.act(Action::TogglePlay);
+        p.act(Action::TogglePlay);
+        assert_eq!(p.position(), 10.0);
+    }
+
+    #[test]
+    fn seeking_back_while_following_catches_up_then_goes_live_again() {
+        let mut p = following();
+        p.seek(4.0);
+        p.append(later(11));
+        assert_eq!(p.position(), 4.0, "history stays put while events arrive");
+        assert_eq!(p.duration(), 11.0);
+
+        p.advance(Duration::from_secs(9)); // plays past the new end
+        assert_eq!(p.position(), 11.0, "caught up");
+        p.append(later(12));
+        assert_eq!(p.position(), 12.0, "live again");
+    }
+
+    #[test]
+    fn a_paused_follower_does_not_move() {
+        let mut p = following();
+        p.act(Action::TogglePlay); // pause at the edge
+        p.append(later(12));
+        assert_eq!(p.position(), 10.0);
+        assert_eq!(p.duration(), 12.0);
+    }
+
+    #[test]
+    fn following_an_empty_recording_starts_at_its_first_event() {
+        let mut p = Player::new("new.txt", vec![], settings());
+        p.set_tailing(true);
+        p.play();
+        p.append(session());
+        assert_eq!(p.duration(), 10.0);
+        assert_eq!(p.position(), 10.0);
+        assert_eq!(*p.state(), folded_to(10));
     }
 }

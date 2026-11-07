@@ -69,12 +69,16 @@ pub struct ReplayArgs {
     pub window: Option<usize>,
     pub speed: f64,
     /// Seconds into the session to start at.
-    pub start: f64,
+    /// Seconds into the session to start at (else the start, or the live edge
+    /// with `--follow`).
+    pub start: Option<f64>,
     /// Print the single frame at this time instead of playing.
     pub at: Option<f64>,
     pub heatmap: bool,
     /// Open paused at `start` instead of playing.
     pub paused: bool,
+    /// Keep reading the file as it grows, staying on the newest event.
+    pub follow: bool,
     /// Size of a printed frame.
     pub width: usize,
     pub height: usize,
@@ -103,7 +107,11 @@ pub fn usage(command: &str) -> &'static str {
              A seeded synthetic tick stream folds into the forming candle, the volume and\n\
              delta panels, and a Level 2 depth ladder in real time.\n\n\
              OPTIONS:\n    --fps N    frames per second (default 12)\n\n\
-             KEYS:\n    q / Esc    quit\n"
+             KEYS:\n    h l / ← →    pan (holds the view while candles keep arriving)\n    \
+             k j / + -    zoom in / out\n    f            follow the forming candle again\n    \
+             c            crosshair: read out a bar\n    , .          move the crosshair one bar\n    \
+             Esc          hide the crosshair, else quit\n    q            quit\n\n\
+             MOUSE:\n    hover for the crosshair, wheel to zoom, drag to pan\n"
         }
         "browse" => {
             "finchart browse\n\n\
@@ -123,6 +131,8 @@ pub fn usage(command: &str) -> &'static str {
              \x20   --speed X       playback speed, 0.25 to 64 (default 1)\n\
              \x20   --start TIME    start this far in, as SECS or M:SS (default 0)\n\
              \x20   --paused        open paused at the start time\n\
+             \x20   --follow        keep reading the file as it is written (like tail -f) and\n\
+             \x20                   stay on the newest event; seek back and it catches up\n\
              \x20   --at TIME       print the frame at TIME and exit\n\
              \x20   --size WxH      size of a printed frame (default 120x30)\n\
              \x20   --interval S    candle interval in seconds (default: file header, else 1)\n\
@@ -281,6 +291,13 @@ fn replay_args(args: &mut Args) -> Result<ReplayArgs, String> {
     })?;
     let heatmap = !args.switch("--no-heatmap");
     let paused = args.switch("--paused");
+    let follow = args.switch("--follow");
+    if follow && at.is_some() {
+        return Err(
+            "finchart replay: --follow plays a growing file; it cannot be combined with --at"
+                .to_string(),
+        );
+    }
     let (width, height) = size.unwrap_or((120, 30));
     Ok(ReplayArgs {
         file: args.required("FILE")?.into(),
@@ -288,10 +305,11 @@ fn replay_args(args: &mut Args) -> Result<ReplayArgs, String> {
         tick,
         window,
         speed: speed.unwrap_or(1.0),
-        start: start.unwrap_or(0.0),
+        start,
         at,
         heatmap,
         paused,
+        follow,
         width,
         height,
     })
@@ -483,10 +501,11 @@ mod tests {
                 tick: None,
                 window: None,
                 speed: 1.0,
-                start: 0.0,
+                start: None,
                 at: None,
                 heatmap: true,
                 paused: false,
+                follow: false,
                 width: 120,
                 height: 30,
             }))
@@ -509,7 +528,7 @@ mod tests {
         assert_eq!(a.tick, Some(0.05));
         assert_eq!(a.window, Some(40));
         assert_eq!(a.speed, 4.0);
-        assert_eq!(a.start, 56.0);
+        assert_eq!(a.start, Some(56.0));
         assert!(!a.heatmap);
 
         let Ok(Command::Replay(a)) = parse_str("replay s.txt --at 1:28.5 --size 100x24") else {
@@ -517,6 +536,17 @@ mod tests {
         };
         assert_eq!(a.at, Some(88.5));
         assert_eq!((a.width, a.height), (100, 24));
+    }
+
+    #[test]
+    fn replay_can_follow_a_growing_file() {
+        let Ok(Command::Replay(a)) = parse_str("replay live.txt --follow") else {
+            panic!("did not parse");
+        };
+        assert!(a.follow);
+        assert!(parse_str("replay live.txt --follow --at 1:00")
+            .unwrap_err()
+            .contains("--follow"));
     }
 
     #[test]
